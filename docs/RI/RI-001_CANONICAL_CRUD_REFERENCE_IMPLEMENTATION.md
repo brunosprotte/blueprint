@@ -1,3 +1,11 @@
+---
+type: ReferenceImplementation
+title: "RI-001 — Canonical CRUD Reference Implementation"
+description: "Esta implementação de referência demonstra o fluxo completo de um CRUD seguindo o Blueprint."
+tags: [RI-001_CANONICAL_CRUD_REFERENCE_IMPLEMENTATION]
+timestamp: "2026-07-04T19:43:24Z"
+---
+
 # RI-001 — Canonical CRUD Reference Implementation
 
 > **Reference Implementation**

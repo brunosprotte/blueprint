@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-010 — Application Failure Model"
+description: "Como a arquitetura representa situações em que uma operação não pode produzir o resultado esperado?"
+tags: [ES-010_APPLICATION_FAILURE_MODEL]
+timestamp: "2026-07-04T18:36:18Z"
+---
+
 # ES-010 — Application Failure Model
 
 > **Engineering Standard**

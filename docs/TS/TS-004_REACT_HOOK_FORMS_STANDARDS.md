@@ -1,4 +1,12 @@
-﻿# TS-004 � React Hook Form Standard
+---
+type: TechnologyStandard
+title: "TS-004 � React Hook Form Standard"
+description: "Como gerenciar o ciclo de vida de formul�rios utilizando React Hook Form preservando a arquitetura do Blueprint?"
+tags: [TS-004_REACT_HOOK_FORMS_STANDARDS]
+timestamp: "2026-07-04T19:34:37Z"
+---
+
+# TS-004 � React Hook Form Standard
 
 > **Technology Standard**
 

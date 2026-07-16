@@ -1,3 +1,11 @@
+---
+type: TechnologyStandard
+title: "TS-005 — Shadcn/UI Standard"
+description: "Como implementar o Design System oficial utilizando shadcn/ui preservando a arquitetura do Blueprint?"
+tags: [TS-005_SHADCN_UI_STANDARDS]
+timestamp: "2026-07-04T17:50:40Z"
+---
+
 # TS-005 — Shadcn/UI Standard
 
 > **Technology Standard**

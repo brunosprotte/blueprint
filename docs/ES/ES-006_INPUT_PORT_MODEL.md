@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-006 — Input Port Model"
+description: "Qual é o papel de um Input Port no modelo arquitetural do Blueprint?"
+tags: [ES-006_INPUT_PORT_MODEL]
+timestamp: "2026-07-04T18:12:56Z"
+---
+
 # ES-006 — Input Port Model
 
 > **Engineering Standard**

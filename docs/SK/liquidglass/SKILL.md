@@ -1,8 +1,12 @@
-﻿---
-name: liquid-glass-ui
-description: Guia para cria��o de componentes Next.js 16 utilizando Tailwind CSS 4 seguindo a identidade visual Liquid Glass.
+---
+description: "Guia para cria��o de componentes Next.js 16 utilizando Tailwind CSS 4 seguindo a identidade visual Liquid Glass."
+type: Skill
 version: 1.0
+tags: [liquidglass, SKILL]
 author: OpenAI
+name: liquid-glass-ui
+title: "Skill: Liquid Glass UI"
+timestamp: "2026-07-04T19:34:37Z"
 ---
 
 # Skill: Liquid Glass UI

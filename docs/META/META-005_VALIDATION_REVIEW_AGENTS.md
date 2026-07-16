@@ -1,3 +1,11 @@
+---
+type: Meta
+title: "META-005 — Validation Review Agents"
+description: "Registrar o fluxo obrigatório de validação final após qualquer BR ou SPEC gerada."
+tags: [META-005_VALIDATION_REVIEW_AGENTS]
+timestamp: "2026-07-04T11:34:11Z"
+---
+
 # META-005 — Validation Review Agents
 
 ## Objetivo

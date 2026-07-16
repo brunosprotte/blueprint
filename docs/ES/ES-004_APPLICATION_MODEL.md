@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-004 — Application Model"
+description: "Qual é o papel da entidade **Application** no modelo arquitetural do Blueprint?"
+tags: [ES-004_APPLICATION_MODEL]
+timestamp: "2026-07-04T17:40:51Z"
+---
+
 # ES-004 — Application Model
 
 > **Engineering Standard**

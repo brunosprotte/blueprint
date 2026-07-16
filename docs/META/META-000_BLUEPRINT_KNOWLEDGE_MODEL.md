@@ -1,3 +1,11 @@
+---
+type: Meta
+title: "META-000 — Blueprint Knowledge Model"
+description: "Este documento descreve a organização do conhecimento utilizada pelo Blueprint."
+tags: [META-000_BLUEPRINT_KNOWLEDGE_MODEL]
+timestamp: "2026-07-04T11:34:11Z"
+---
+
 # META-000 — Blueprint Knowledge Model
 
 > **Meta Document**

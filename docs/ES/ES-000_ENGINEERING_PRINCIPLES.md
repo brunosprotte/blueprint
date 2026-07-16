@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-000 — Engineering Principles"
+description: "Quais princípios governam todas as decisões arquiteturais do Blueprint?"
+tags: [ES-000_ENGINEERING_PRINCIPLES]
+timestamp: "2026-07-04T17:18:50Z"
+---
+
 # ES-000 — Engineering Principles
 
 > **Engineering Standard**

@@ -1,0 +1,3 @@
+# Technology Packs
+
+* ["TP-001 — Next.js Full Stack"](/TP/TP-001_NEXTJS_FULL_STACK.md) - Este Technology Pack define uma stack oficialmente homologada para desenvolvimento de aplicações Full Stack...

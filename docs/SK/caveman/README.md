@@ -1,3 +1,11 @@
+---
+type: Skill
+title: caveman
+description: "Talk like smart caveman. Same brain, fewer tokens."
+tags: [caveman, README]
+timestamp: "2026-07-04T13:25:29Z"
+---
+
 # caveman
 
 Talk like smart caveman. Same brain, fewer tokens.

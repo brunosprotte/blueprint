@@ -1,4 +1,12 @@
-﻿# TS-002 � Prisma Persistence Standard
+---
+type: TechnologyStandard
+title: "TS-002 � Prisma Persistence Standard"
+description: "Como implementar capacidades de persist�ncia utilizando Prisma sem violar a arquitetura do Blueprint?"
+tags: [TS-002_PRIMSA_PERSISTENCE_STANDARDS]
+timestamp: "2026-07-04T19:34:37Z"
+---
+
+# TS-002 � Prisma Persistence Standard
 
 > **Technology Standard**
 

@@ -1,3 +1,11 @@
+---
+type: Meta
+title: "META-003 — Runtime Execution Model"
+description: "Este documento define como um agente Blueprint deve se comportar durante a execução."
+tags: [META-003_RUNTIME_EXECUTION_MODEL]
+timestamp: "2026-07-04T11:34:11Z"
+---
+
 # META-003 — Runtime Execution Model
 
 > **Meta Document**

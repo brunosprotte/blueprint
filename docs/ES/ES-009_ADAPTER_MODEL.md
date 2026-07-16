@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-009 — Adapter Model"
+description: "Qual é o papel de um Adapter no modelo arquitetural do Blueprint?"
+tags: [ES-009_ADAPTER_MODEL]
+timestamp: "2026-07-04T17:58:31Z"
+---
+
 # ES-009 — Adapter Model
 
 > **Engineering Standard**

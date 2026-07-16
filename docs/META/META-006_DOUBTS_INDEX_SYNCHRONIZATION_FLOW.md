@@ -1,16 +1,24 @@
+---
+type: Meta
+title: "META-006 — Doubts Index Synchronization Flow"
+description: "Este documento define o fluxo oficial para manter os índices de dúvidas sincronizados quando uma BR ou SPEC é gerada, revisada ou aprovada."
+tags: [META-006_DOUBTS_INDEX_SYNCHRONIZATION_FLOW]
+timestamp: "2026-07-04T11:34:11Z"
+---
+
 # META-006 — Doubts Index Synchronization Flow
 
 > **Meta Document**
 
-| Campo           | Valor                              |
-| --------------- | ---------------------------------- |
-| **ID**          | META-006                           |
-| **Título**      | Doubts Index Synchronization Flow   |
-| **Versão**      | 1.0.0                              |
-| **Status**      | Approved                           |
-| **Owner**       | Blueprint Architecture              |
-| **Obrigatório** | Sim                                |
-| **Aplica-se**   | BR, SPEC                           |
+| Campo           | Valor                             |
+| --------------- | --------------------------------- |
+| **ID**          | META-006                          |
+| **Título**      | Doubts Index Synchronization Flow |
+| **Versão**      | 1.0.0                             |
+| **Status**      | Approved                          |
+| **Owner**       | Blueprint Architecture            |
+| **Obrigatório** | Sim                               |
+| **Aplica-se**   | BR, SPEC                          |
 
 ---
 

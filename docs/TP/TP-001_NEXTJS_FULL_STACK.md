@@ -1,3 +1,11 @@
+---
+type: TechnologyPack
+title: "TP-001 — Next.js Full Stack"
+description: "Este Technology Pack define uma stack oficialmente homologada para desenvolvimento de aplicações Full Stack utilizando o Blueprint."
+tags: [TP-001_NEXTJS_FULL_STACK]
+timestamp: "2026-07-04T16:42:40Z"
+---
+
 # TP-001 — Next.js Full Stack
 
 > **Technology Pack**

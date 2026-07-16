@@ -1,3 +1,11 @@
+---
+type: TechnologyStandard
+title: "TS-006 — Backend Unit Testing Standard"
+description: "Como testar unidades de back-end em projetos Blueprint sem acoplar testes a frameworks, banco de dados ou infraestrutura real?"
+tags: [TS-006_BACKEND_UNIT_TESTS_STANDARDS]
+timestamp: "2026-07-04T12:02:32Z"
+---
+
 # TS-006 — Backend Unit Testing Standard
 
 > **Technology Standard**

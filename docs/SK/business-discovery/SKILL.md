@@ -1,3 +1,11 @@
+---
+type: Skill
+title: "SK-001 — Business Discovery"
+description: "Esta Skill é responsável por descobrir e estruturar requisitos de negócio."
+tags: [business-discovery, SKILL]
+timestamp: "2026-07-04T11:34:28Z"
+---
+
 # SK-001 — Business Discovery
 
 > **Blueprint Skill**
@@ -363,7 +371,12 @@ Todo documento gerado deve iniciar com os seguintes metadados.
 id: BR-001
 module: login
 feature: login
+type: Business Rule
+title: <one-line summary of the business rule>
+description: <one-line summary for OKF catalog consumers>
 status: draft
+tags: [<tag>, <tag>]
+timestamp: <ISO 8601>
 doubtsIndex: docs/implementation-artifacts/duvidas-br/BR-001.md
 version: 1.0.0
 generatedBy: SK-001
@@ -413,7 +426,8 @@ Ao executar esta Skill, um agente deve concluir que:
 - a sincronização de dúvidas de BR segue META-006;
 - toda BR passa por revisão do usuário e por três agentes antes de ser aprovada;
 - dúvidas de BR devem ser rastreadas em arquivo próprio;
-- a BR deve estar pronta para ser consumida pela SK-002.
+- a BR deve estar pronta para ser consumida pela SK-002;
+- a BR pode ser catalogada como conceito OKF via SK-003 quando o conjunto de BRs relacionadas justificar um bundle de catálogo.
 
 ---
 
@@ -433,3 +447,12 @@ docs/BR/<modulo>/<feature>.md
 SK-002
 Specification Builder
 ```
+
+---
+
+# 21. References
+
+- META-004 — Workspace Convention
+- META-006 — Doubts Index Synchronization Flow
+- SK-002 — Technical Planning
+- SK-003 — OKF Cataloging

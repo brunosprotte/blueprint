@@ -1,3 +1,11 @@
+---
+type: Skill
+title: Cypress Testing Guide
+description: "Testes e2e/integração. Real scenarios. Project-specific."
+tags: [write-tests-cypress]
+timestamp: "2026-07-04T19:30:00Z"
+---
+
 # Cypress Testing Guide
 
 Testes e2e/integração. Real scenarios. Project-specific.

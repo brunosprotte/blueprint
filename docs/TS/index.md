@@ -1,0 +1,9 @@
+# Technology Standards
+
+* ["TS-005 — Shadcn/UI Standard"](/TS/TS-005_SHADCN_UI_STANDARDS.md) - Como implementar o Design System oficial utilizando shadcn/ui preservando a arquitetura do Blueprint?
+* ["TS-006 — Backend Unit Testing Standard"](/TS/TS-006_BACKEND_UNIT_TESTS_STANDARDS.md) - Como testar unidades de back-end em projetos Blueprint sem acoplar testes a frameworks, banco de dados ou i...
+* ["TS-007 — Frontend Unit Testing Standard"](/TS/TS-007_FRONTEND_UNIT_TESTS_STANDARDS.md) - Como validar o comportamento da interface de usuário em projetos Blueprint sem depender do navegador, backe...
+* ["TS-004 � React Hook Form Standard"](/TS/TS-004_REACT_HOOK_FORMS_STANDARDS.md) - Como gerenciar o ciclo de vida de formul�rios utilizando React Hook Form preservando a arquitetura do Bluep...
+* ["TS-001 — Next.js Standard"](/TS/TS-001_NEXTJS_STANDARDS.md) - Como materializar os conceitos do Blueprint usando Next.js?
+* ["TS-002 � Prisma Persistence Standard"](/TS/TS-002_PRIMSA_PERSISTENCE_STANDARDS.md) - Como implementar capacidades de persist�ncia utilizando Prisma sem violar a arquitetura do Blueprint?
+* ["TS-003 — Zod Validation Standard"](/TS/TS-003_ZOD_VALIDATION_STANDARDS.md) - Como implementar validação estrutural usando Zod sem violar a arquitetura do Blueprint?

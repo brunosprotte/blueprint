@@ -1,3 +1,11 @@
+---
+type: Meta
+title: "META-001 — Knowledge Resolution Engine"
+description: Este documento define o algoritmo oficial utilizado para resolver conhecimento dentro do Blueprint.
+tags: [META-001_KNOWLEDGE_RESOLUTION_ENGINE]
+timestamp: "2026-07-04T11:34:11Z"
+---
+
 # META-001 — Knowledge Resolution Engine
 
 > **Meta Document**

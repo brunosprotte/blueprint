@@ -1,3 +1,11 @@
+---
+type: Skill
+title: "SK-002 — Technical Planning"
+description: "Esta Skill é responsável por transformar Business Rules em um conjunto de Functional Specifications implementáveis."
+tags: [technical-planning, SKILL]
+timestamp: "2026-07-04T11:34:28Z"
+---
+
 # SK-002 — Technical Planning
 
 > **Blueprint Skill**
@@ -360,16 +368,16 @@ Toda SPEC deve iniciar com.
 id: SPEC-001
 module: login
 feature: login-frontend
-
+type: Functional Specification
+title: <one-line summary of the spec>
+description: <one-line summary for OKF catalog consumers>
 createdBy: SK-002
-
 createdFrom: BR-001
-
 technologyPack: TP-001
-
 status: draft
+tags: [<tag>, <tag>]
+timestamp: <ISO 8601>
 doubtsIndex: docs/implementation-artifacts/duvidas-spec/SPEC-001.md
-
 version: 1.0.0
 ---
 ```
@@ -446,7 +454,8 @@ Ao executar esta Skill o agente deve concluir que.
 - O objetivo não é minimizar a quantidade de documentos.
 - O objetivo é maximizar coesão e minimizar acoplamento.
 - SPECs independentes devem poder ser implementadas em paralelo.
-- Nenhum Acceptance Criteria pode ficar sem cobertura.
+- Nenhum Acceptance Criteria pode ficar sem cobertura;
+- a SPEC pode ser catalogada como conceito OKF via SK-003 quando o conjunto de SPECs relacionadas justificar um bundle de catálogo.
 - a sincronização de dúvidas de SPEC segue META-006;
 - toda SPEC passa por revisão do usuário e por três agentes antes de ser aprovada;
 - dúvidas de SPEC devem ser rastreadas em arquivo próprio.
@@ -473,3 +482,13 @@ Specification Graph
         ▼
 docs/SPEC/<module>/
 ```
+
+---
+
+# 22. References
+
+- META-001 — Knowledge Resolution Engine
+- META-004 — Workspace Convention
+- META-006 — Doubts Index Synchronization Flow
+- SK-001 — Business Discovery
+- SK-003 — OKF Cataloging

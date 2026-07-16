@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-001 — Architectural Layers"
+description: "Como o Blueprint organiza responsabilidades arquiteturais para preservar independência entre conceitos e implementações?"
+tags: [ES-001_ARCHITECTURAL_LAYERS]
+timestamp: "2026-07-04T17:20:20Z"
+---
+
 # ES-001 — Architectural Layers
 
 > **Engineering Standard**

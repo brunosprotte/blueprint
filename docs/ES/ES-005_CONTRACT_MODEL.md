@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-005 — Contract Model"
+description: "Qual é o papel de um Contract no modelo arquitetural do Blueprint?"
+tags: [ES-005_CONTRACT_MODEL]
+timestamp: "2026-07-04T17:43:35Z"
+---
+
 # ES-005 — Contract Model
 
 > **Engineering Standard**

@@ -1,3 +1,11 @@
+---
+type: TechnologyStandard
+title: "TS-001 — Next.js Standard"
+description: "Como materializar os conceitos do Blueprint usando Next.js?"
+tags: [TS-001_NEXTJS_STANDARDS]
+timestamp: "2026-07-04T18:53:24Z"
+---
+
 # TS-001 — Next.js Standard
 
 > **Technology Standard**

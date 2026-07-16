@@ -1,4 +1,12 @@
-﻿# Skill: write-tests
+---
+type: Skill
+title: "Skill: write-tests"
+description: "Se quiser rodar apenas um arquivo espec�fico:"
+tags: [write-tests]
+timestamp: "2026-07-04T19:34:37Z"
+---
+
+# Skill: write-tests
 
 > Use quando precisar implementar ou validar novos testes unit�rios, de integra��o ou de componente no projeto.
 > O objetivo � manter a l�gica do backend coberta com mocks e criar testes de frontend que verifiquem fluxos e valida��es, sem depender de Supabase real.

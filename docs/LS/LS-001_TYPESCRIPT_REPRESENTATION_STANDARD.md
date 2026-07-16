@@ -1,3 +1,11 @@
+---
+type: LanguageStandard
+title: "LS-001 — TypeScript Representation Standard"
+description: "Como representar os conceitos arquiteturais do Blueprint em TypeScript?"
+tags: [LS-001_TYPESCRIPT_REPRESENTATION_STANDARD]
+timestamp: "2026-07-04T19:32:10Z"
+---
+
 # LS-001 — TypeScript Representation Standard
 
 > **Language Standard**

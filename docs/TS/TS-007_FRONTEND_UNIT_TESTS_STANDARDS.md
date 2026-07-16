@@ -1,3 +1,11 @@
+---
+type: TechnologyStandard
+title: "TS-007 — Frontend Unit Testing Standard"
+description: "Como validar o comportamento da interface de usuário em projetos Blueprint sem depender do navegador, backend ou infraestrutura?"
+tags: [TS-007_FRONTEND_UNIT_TESTS_STANDARDS]
+timestamp: "2026-07-04T12:05:04Z"
+---
+
 # TS-007 — Frontend Unit Testing Standard
 
 > **Technology Standard**

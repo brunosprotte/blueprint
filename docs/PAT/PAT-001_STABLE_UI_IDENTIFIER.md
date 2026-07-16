@@ -1,3 +1,11 @@
+---
+type: Pattern
+title: "PAT-001 — Stable UI Identifier"
+description: "Como identificar elementos da interface de forma estável, independente da tecnologia utilizada e resistente a mudanças visuais?"
+tags: [PAT-001_STABLE_UI_IDENTIFIER]
+timestamp: "2026-07-04T12:14:09Z"
+---
+
 # PAT-001 — Stable UI Identifier
 
 > **Pattern**

@@ -1,0 +1,3 @@
+# Duvidas de SPEC
+
+## Estado

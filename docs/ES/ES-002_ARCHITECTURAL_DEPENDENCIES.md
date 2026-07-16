@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-002 — Architectural Dependencies"
+description: "Como entidades arquiteturais podem estabelecer relacionamentos sem comprometer a independência da arquitetura?"
+tags: [ES-002_ARCHITECTURAL_DEPENDENCIES]
+timestamp: "2026-07-04T17:22:25Z"
+---
+
 # ES-002 — Architectural Dependencies
 
 > **Engineering Standard**

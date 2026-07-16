@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-011 — Architectural Boundary Model"
+description: "Qual é o papel de uma fronteira arquitetural no modelo do Blueprint?"
+tags: [ES-011_ARCHITECTURAL_BOUNDARY_MODEL]
+timestamp: "2026-07-04T18:40:38Z"
+---
+
 # ES-011 — Architectural Boundary Model
 
 > **Engineering Standard**

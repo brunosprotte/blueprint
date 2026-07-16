@@ -1,3 +1,11 @@
+---
+type: TechnologyStandard
+title: "TS-003 — Zod Validation Standard"
+description: "Como implementar validação estrutural usando Zod sem violar a arquitetura do Blueprint?"
+tags: [TS-003_ZOD_VALIDATION_STANDARDS]
+timestamp: "2026-07-04T20:02:20Z"
+---
+
 # TS-003 — Zod Validation Standard
 
 > **Technology Standard**

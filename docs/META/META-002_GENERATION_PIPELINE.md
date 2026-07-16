@@ -1,3 +1,11 @@
+---
+type: Meta
+title: "META-002 — Knowledge Evolution Model"
+description: Este documento define como o conhecimento evolui dentro do Blueprint.
+tags: [META-002_GENERATION_PIPELINE]
+timestamp: "2026-07-04T11:34:11Z"
+---
+
 # META-002 — Knowledge Evolution Model
 
 > **Meta Document**

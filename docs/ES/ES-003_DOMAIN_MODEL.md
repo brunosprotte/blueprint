@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-003 — Domain Model"
+description: "Qual é o papel do Domain no modelo arquitetural do Blueprint?"
+tags: [ES-003_DOMAIN_MODEL]
+timestamp: "2026-07-04T17:40:31Z"
+---
+
 # ES-003 — Domain Model
 
 > **Engineering Standard**

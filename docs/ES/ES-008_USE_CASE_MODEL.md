@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-008 — Use Case Model"
+description: "Qual é o papel de um Use Case no modelo arquitetural do Blueprint?"
+tags: [ES-008_USE_CASE_MODEL]
+timestamp: "2026-07-04T17:53:41Z"
+---
+
 # ES-008 — Use Case Model
 
 > **Engineering Standard**

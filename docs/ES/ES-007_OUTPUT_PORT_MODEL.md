@@ -1,3 +1,11 @@
+---
+type: EngineeringStandard
+title: "ES-007 — Output Port Model"
+description: "Qual é o papel de um Output Port no modelo arquitetural do Blueprint?"
+tags: [ES-007_OUTPUT_PORT_MODEL]
+timestamp: "2026-07-04T18:14:08Z"
+---
+
 # ES-007 — Output Port Model
 
 > **Engineering Standard**
