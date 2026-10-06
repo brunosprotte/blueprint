@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run the architectural linter on staged .md and .ts files.
+# Installed via tools/install-hooks.sh (sets core.hooksPath = tools/hooks).
+# Exit 0 = clean, 1 = lint violations.
+
+set -e
+
+# $GIT_DIR is set by git when invoking the hook. We need the working tree.
+WT="$(git rev-parse --show-toplevel)"
+LINT="$WT/tools/lint.py"
+
+if [ ! -f "$LINT" ]; then
+    echo "pre-commit: $LINT not found, skipping lint"
+    exit 0
+fi
+
+# Collect staged files (.md under docs/, .ts/.tsx under implementation-artifacts/).
+STAGED=$(git diff --cached --name-only --diff-filter=ACM | \
+    grep -E '\.(md|ts|tsx)$' || true)
+
+if [ -z "$STAGED" ]; then
+    exit 0
+fi
+
+# Lint runs over the whole tree (cheap, ms). Staging check is the fast path
+# for the common case where no relevant file is staged.
+echo "pre-commit: running tools/lint.py…"
+python "$LINT" --ignore META-004

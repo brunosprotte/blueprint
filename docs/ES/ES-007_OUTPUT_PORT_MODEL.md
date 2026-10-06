@@ -336,3 +336,16 @@ Este documento complementa:
 As representações dos Output Ports pertencem aos Language Standards.
 
 As implementações pertencem aos Technology Standards.
+
+
+## Section: Hinge — When to Create an Output Port
+
+Capability external ao modelo da Application vira Output Port.
+  capability external to Application model needed?
+    -> YES: define Output Port (interface)
+    categories: persistence, storage, comms, auth, authz, messaging, AI,
+             external processing, observability, external integration
+  capability is internal Domain concept (pure logic)?
+    -> NO Output Port
+
+Full rule: External Capabilities section (11-bullet list).

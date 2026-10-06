@@ -456,3 +456,60 @@ Specification Builder
 - META-006 — Doubts Index Synchronization Flow
 - SK-002 — Technical Planning
 - SK-003 — OKF Cataloging
+
+
+## Árvores de Decisão
+
+### `BR-Ready Gate`
+  BR has at least one capability with a measurable outcome?
+    -> NOT READY: ask user to clarify the capability list
+  BR has at least one actor (human or system) that triggers a capability?
+    -> NOT READY: no actors means no boundary to model
+  BR has acceptance criteria (even draft) for the main capability?
+    -> NOT READY: cannot validate SPECs against undefined AC
+  all three present?
+    -> READY: open SPEC branches per capability
+
+### `Ask vs Assume`
+  missing detail blocks the next concrete step (file path, port, schema)?
+    -> ASK one short question; do not proceed on assumption
+  missing detail is a stylistic preference (naming, ordering, comment style)?
+    -> ASSUME the simpler / more idiomatic option and proceed
+  missing detail is a business rule with non-obvious cost?
+    -> ASK with 2-4 options previewed
+
+### `Capability vs Screen`
+  outcome is achieved by a domain operation (no UI)?
+    -> CAPABILITY (Use Case at the API/Application layer)
+  outcome requires user input via a form/screen to complete?
+    -> SCREEN (UI + backend use case)
+  outcome is a derivation / projection of existing data?
+    -> READ-side query, NOT a capability — model as Contract only
+
+### `AC Shape`
+  AC has [Given / When / Then] AND a measurable observable result?
+    -> keep
+  AC is "the system should work well"?
+    -> NOT an AC; rewrite with concrete behavior + observable signal
+  AC requires an internal-only assertion (test passes)?
+    -> acceptable as test AC, but not as user-facing acceptance
+
+### `Open Question Lifecycle`
+  open question blocks a SPEC from being drafted?
+    -> BLOCKING; surface in `duvidas-spec` before generating the SPEC
+  open question is cosmetic / naming?
+    -> NON-BLOCKING; defer; record in `duvidas-spec` with owner + ETA
+  open question is answered?
+    -> CLOSE: update BR/SPEC; remove from `duvidas-spec`
+
+### `Lifecycle Status Transitions`
+  status is `draft`?
+    -> move to `pending` once BR has all 3 BR-Ready Gate items
+  status is `pending`?
+    -> move to `on user review` once SPEC branches drafted
+  status is `on user review`?
+    -> move to `on agents review` after user signs off
+  status is `on agents review`?
+    -> move to `approved` after 3 reviewers agree (lint, schema, smoke)
+  status is `approved`?
+    -> move to `stable` only when the same SPEC passes ≥2 independent builds

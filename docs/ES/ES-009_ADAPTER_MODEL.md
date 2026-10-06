@@ -313,3 +313,16 @@ Este documento complementa:
 As representações de Adapters pertencem aos Language Standards.
 
 As implementações pertencem aos Technology Standards.
+
+
+## Section: Hinge — What Translates vs What Computes
+
+Adapter = pure translation between an external shape and a Domain/Contract shape.
+  capability translates bytes/JSON/HTTP/ORM row <-> Contract?
+    -> Adapter (ES-009)
+  capability decides business rules, validation logic, OR workflow steps?
+    -> NOT an Adapter; goes to Domain or Application
+  capability imports `domain/` to call business logic?
+    -> Forbidden — adapter is translation only
+
+Full rule: Translation Model section + ES-009.4 import direction.

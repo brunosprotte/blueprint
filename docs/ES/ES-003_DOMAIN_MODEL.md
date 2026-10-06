@@ -270,3 +270,18 @@ Este documento complementa:
 Os conceitos pertencentes ao Domain são representados pelos Language Standards.
 
 As implementações pertencem aos Technology Standards.
+
+
+## Section: Hinge — What Belongs in Domain
+
+Domain holds entities, value objects, contracts, and business rules — nothing else.
+  capability is a business invariant or behavior on a stateful entity?
+    -> Domain entity (class with methods)
+  capability is a stateless description (type, dto, schema)?
+    -> Contract (type/interface)
+  capability needs I/O, orchestration, or external translation?
+    -> NOT Domain; goes to Application/Use Case or Adapter
+  capability is a use-case-specific decision?
+    -> NOT Domain; goes to Application
+
+Full rules: Entity Model and Domain vs. Application sections.

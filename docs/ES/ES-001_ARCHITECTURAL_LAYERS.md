@@ -304,3 +304,18 @@ Este documento complementa:
 - ES-011 — Infrastructure Model
 
 Os relacionamentos completos entre as camadas são definidos pelos documentos META do Blueprint.
+
+
+## Section: Hinge — Where Does This Concept Live?
+
+Placement classifica um novo conceito por responsabilidade.
+  capability is pure business knowledge (invariant, behavior)
+    -> Domain (ES-003)
+  capability orchestrates Domain logic to fulfill a use case
+    -> Application / Use Case (ES-008)
+  capability translates an external representation (HTTP, persistence, third-party)
+    -> Adapter (ES-009)
+  capability is the boundary contract consumed by Use Cases
+    -> Input Port (ES-006) or Output Port (ES-007)
+
+Full rule: see Layer Responsibilities section.

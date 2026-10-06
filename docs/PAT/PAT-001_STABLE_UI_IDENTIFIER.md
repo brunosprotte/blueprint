@@ -280,3 +280,34 @@ Exemplos incluem:
 - mecanismos equivalentes definidos pelos Technology Standards.
 
 A forma concreta de implementação pertence aos respectivos Technology Standards.
+
+
+## Section: Hinge — Identifier Construction
+
+Construction rule for any `data-testid` value.
+  identifier is per-screen, per-component, semantically stable
+    -> format: `<screen-slug>--<component-role>--<element-purpose>`
+    example: `checkout--payment-form--submit-btn`
+  identifier embeds a value (id, name, slug, timestamp, random)?
+    -> Forbidden — value drift breaks test stability
+  identifier mirrors copy text (button label, heading)?
+    -> Forbidden — i18n / copy edits must not break tests
+  identifier uses a CSS class or styling token?
+    -> Forbidden — separate concern from styling
+
+Full rules: Naming, Format, Forbidden Patterns sections.
+
+
+## Section: Hinge — When a Stable Identifier Is Required
+
+Every interactive element gets a stable identifier; static text does not.
+  element is interactive (button, link, input, select, textarea, form)?
+    -> REQUIRED: add `data-testid`
+  element is presentational (icon, span, divider, image)?
+    -> NOT REQUIRED; skip to keep DOM clean
+  element is a label or paragraph that is the assertion target?
+    -> add `data-testid` so tests don't depend on copy
+  element appears inside a list/map (row, card, item)?
+    -> REQUIRED, with a stable role suffix; per-row data goes in `data-*` attrs
+
+Full rule: Coverage section.

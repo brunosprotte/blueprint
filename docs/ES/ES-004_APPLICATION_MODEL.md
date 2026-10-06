@@ -306,3 +306,18 @@ Este documento complementa:
 As representações da entidade Application pertencem aos Language Standards.
 
 As implementações pertencem aos Technology Standards.
+
+
+## Section: Hinge — What Application May Touch
+
+Application orchestrates Domain; it does not own business rules and does not talk to the world.
+  capability orchestrates Domain objects into a use case?
+    -> Application / Use Case (ES-008)
+  capability persists state, calls external API, reads environment?
+    -> NOT Application; goes to Adapter (ES-009) via Output Port (ES-007)
+  capability decides a business rule?
+    -> NOT Application; goes to Domain (ES-003)
+  capability holds framework types (HTTP request, ORM session)?
+    -> NEVER; adapters translate at the edge
+
+Full rules: Application Role, Boundaries, Forbidden Imports sections.

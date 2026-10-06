@@ -492,3 +492,82 @@ docs/SPEC/<module>/
 - META-006 — Doubts Index Synchronization Flow
 - SK-001 — Business Discovery
 - SK-003 — OKF Cataloging
+
+
+## Árvores de Decisão
+
+### `Validate BR`
+  BR file exists and parses?
+    -> continue
+  BR is in lifecycle `approved` or `stable`?
+    -> continue; else surface warning but do not block
+  all BR-Ready Gate items present?
+    -> continue
+  any blocking open question in `duvidas-spec`?
+    -> BLOCK; do not draft SPEC until resolved
+
+### `Spec Branch Granularity`
+  SPEC represents one capability from BR?
+    -> keep (1 SPEC = 1 capability)
+  SPEC bundles 2+ capabilities with shared UI/data?
+    -> SPLIT into N SPECs with shared sub-spec for the shared part
+  SPEC is only a refactor / migration with no new behavior?
+    -> No new SPEC; open a RI (Reference Implementation) instead
+
+### `Specification Graph Topology`
+  SPEC imports `INPUT_PORT` only (no concrete adapter)?
+    -> keep (Application depends on Ports, not Adapters)
+  SPEC imports a concrete class from `adapters/`?
+    -> Forbidden — wire through `composition root` only
+  SPEC defines 2 SPECs that share a Contract?
+    -> extract the Contract into `docs/ES/ES-005…` reference; SPECs import
+
+### `Output Port Creation Gate`
+  capability persists state to a datastore?
+    -> YES: define Output Port for the repo
+  capability calls an external system (HTTP, queue, third-party)?
+    -> YES: define Output Port
+  capability reads env / config / secrets?
+    -> YES: define Output Port for the config provider
+  capability is pure in-memory computation?
+    -> NO Output Port needed
+
+### `Contract Creation Gate`
+  shape crosses a boundary (adapter <-> application, application <-> use case)?
+    -> YES: define Contract (interface/type) at the boundary
+  shape is internal to one layer and not crossing?
+    -> NO Contract; use a local type only
+  two boundaries need the same shape?
+    -> ONE Contract, shared at the boundary it belongs to
+
+### `Dependency Analysis`
+  target depends on `domain/`?
+    -> ALLOWED for Application / Use Case / Adapter
+  target depends on `application/`?
+    -> ALLOWED only for Adapters (composition root) and Use Case composition
+  target depends on `adapters/`?
+    -> Forbidden — concrete adapters are wired in composition root
+  target depends on a framework runtime (`next`, `express`) outside `adapters/`?
+    -> Forbidden
+
+### `Lifecycle Status Transitions`
+  status is `draft`?
+    -> move to `pending` once all 4 Validate BR items pass
+  status is `pending`?
+    -> move to `on user review` after SPEC + Output Port list complete
+  status is `on user review`?
+    -> move to `on agents review` after user signs off
+  status is `on agents review`?
+    -> move to `approved` after 3 reviewers agree
+  status is `approved`?
+    -> move to `stable` only after 1+ reference implementation passes
+
+### `3-Reviewer Approval Gate`
+  reviewer 1 = architectural lint (tools/lint.py) clean?
+    -> REQUIRED; failing blocks approval
+  reviewer 2 = schema/types check (Zod/Prisma contracts match SPEC)?
+    -> REQUIRED
+  reviewer 3 = smoke test (one happy-path use case runs end-to-end)?
+    -> REQUIRED
+  all 3 pass?
+    -> APPROVED; transition status to `approved`

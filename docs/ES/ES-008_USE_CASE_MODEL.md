@@ -305,3 +305,16 @@ Este documento complementa:
 As representações dos Use Cases pertencem aos Language Standards.
 
 As implementações pertencem aos Technology Standards.
+
+
+## Section: Hinge — One Capability Per Use Case
+
+Use Case = one user-visible capability. Granularity is a feature, not a bug.
+  capability delivers one observable outcome to one actor?
+    -> one Use Case class implementing one Input Port method
+  capability bundles 2+ outcomes / 2+ actors / "and also"?
+    -> SPLIT into multiple Use Cases
+  capability is shared cross-cutting (logging, metrics, auth check)?
+    -> middleware at the Adapter, NOT a Use Case
+
+Full rule: Execution Model section ("one capability per Use Case").

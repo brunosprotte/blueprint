@@ -293,3 +293,18 @@ Os relacionamentos entre essas entidades são definidos pelos documentos META.
 As representações pertencem aos Language Standards.
 
 As implementações pertencem aos Technology Standards.
+
+
+## Section: Hinge — Boundary Crossing Rules
+
+Cross a boundary only through a Port, never through a concrete dependency.
+  caller is Application and target is external (DB, API, queue)?
+    -> caller depends on Output Port (ES-007), not on Adapter
+  caller is Adapter and target is Application logic?
+    -> caller implements Input Port (ES-006) or calls Use Case via Port
+  caller is in `domain/` and target is Application / Adapter / framework?
+    -> Forbidden — Domain depends on nothing outward
+  caller is in `adapters/` and target is `domain/` business rule?
+    -> Forbidden — adapters translate, do not call business logic
+
+Full rules: Inbound and Outbound sections.

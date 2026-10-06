@@ -288,3 +288,18 @@ Este documento complementa:
 As representações dos Contracts pertencem aos Language Standards.
 
 As implementações pertencem aos Technology Standards.
+
+
+## Section: Hinge — Contract Responsibilities and Violations
+
+Contract is a type-only description; it carries no behavior, no I/O, no import of framework code.
+  capability is a shape (input, output, OR data shape)?
+    -> Contract (interface / type)
+  capability has methods, side effects, OR imports `http`/`fs`/`db`?
+    -> NOT a Contract; go to Domain or Application
+  capability is just a re-export of a Domain class?
+    -> Forbidden — contracts are independent types, not aliases
+
+Architectural violations: importing framework code, declaring methods,
+implementing another contract, sharing a single contract across two
+boundaries with different meanings.

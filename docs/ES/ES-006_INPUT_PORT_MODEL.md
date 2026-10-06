@@ -313,3 +313,17 @@ Este documento complementa:
 As representações de Input Ports pertencem aos Language Standards.
 
 As implementações pertencem aos Technology Standards.
+
+
+## Section: Hinge — When to Create an Input Port
+
+Input Port = boundary contract the Application exposes to the outside world.
+  capability is invoked by an external actor (HTTP, CLI, queue, scheduler)?
+    -> YES: define Input Port (interface)
+    the actor's adapter implements the Input Port
+  capability is internal flow between Application services?
+    -> NO Input Port; call the use case directly
+  capability is a Domain behavior triggered by an event handler?
+    -> YES if the event is external; otherwise NO
+
+Full rule: Input Port Definition + Implementation Pattern sections.
