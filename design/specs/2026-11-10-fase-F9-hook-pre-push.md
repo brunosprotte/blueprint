@@ -39,6 +39,10 @@ server/tests/test_hook.py
 `tools/hooks/pre-commit` e `tools/install-hooks.sh` (padrão de referência do blueprint),
 `server/app/routers/{lint,commits,reviews,knowledge}.py` (F2/F4/F7).
 
+As rotas `POST /api/commits` e `POST /api/reviews` são da **F4**; `POST /api/lint` é da F2;
+`GET /api/knowledge/dossier/{id}` é da F7. Esta fase **apenas consome** esses endpoints —
+não toca em nenhum router.
+
 **Não tocar:** `docs/`, `tools/`, `server/app/**`, `site/`, qualquer `design/specs/`.
 
 ## 3. Contrato

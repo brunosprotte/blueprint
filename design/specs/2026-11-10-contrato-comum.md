@@ -120,6 +120,26 @@ Respostas do maestro (2026-11-10) às dúvidas do agente da F8. **Vinculantes.**
 exit 0; normalização do `SDD_URL` (remove `/api` final); `report` sem `author` e sem
 exit 1; erros locais também em JSON no stdout.
 
+### 4.3 `commits.status` — dono é o F4 (resolvido 2026-11-10)
+
+A coluna `commits.status` é **do F4** (migration `004_commits.sql`), não do F7:
+
+```sql
+ALTER TABLE commits ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'present';
+ALTER TABLE commits DROP CONSTRAINT IF EXISTS commits_status_check;
+ALTER TABLE commits ADD CONSTRAINT commits_status_check CHECK (status IN ('present','orphaned'));
+CREATE UNIQUE INDEX IF NOT EXISTS commits_repo_sha_uniq ON commits (repo_id, sha);
+```
+
+- Valores canônicos: **`present` | `orphaned`**. `orphaned` = commit registrado que
+  não existe no remoto (reconcile, design master §13).
+- **O F7 não cria a coluna.** A migration `005` do F7 **não** faz
+  `ADD COLUMN commits.status` — ela apenas **consome** a coluna, filtrando
+  `status <> 'orphaned'` no dossiê. Se o F7 criar a coluna, o `ADD COLUMN IF NOT
+  EXISTS` é inofensivo, mas o `CHECK` com valores diferentes quebraria o F4.
+- O default `'present'` garante que commits já gravados não somem do dossiê.
+- O F7 filtra por `status <> 'orphaned'` (não por `= 'reported'`).
+
 ## 5. Variáveis de ambiente
 
 Lidas por `app/config.py` (pydantic-settings). Prefixo `SDD_`.
