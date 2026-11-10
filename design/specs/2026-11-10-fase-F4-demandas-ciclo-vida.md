@@ -463,6 +463,7 @@ Zera `claimed_by`/`claimed_at`. Condição: `claimed_by` == usuário do token �
 | --- | --- | --- |
 | `GET /api/artifacts?demand=&repo=` | autenticado | — |
 | `GET /api/artifacts/{id}` | autenticado | — |
+| `GET /api/artifacts/pending?repo=&demand=` | autenticado | — |
 | `POST /api/artifacts/sync` | `artifact:sync` | `{repo, docs:[{path, content}]}` |
 | `POST /api/artifacts/{id}/request-review` | `artifact:approve` | — |
 | `POST /api/artifacts/{id}/approve` | `artifact:approve` | — |
@@ -516,6 +517,32 @@ Evento: `artifact.stabilized`.
  "doubts":[{"id":"…uuid…","question":"…","status":"pending","source":"linter",
             "raised_at":"…","resolved_at":null}]}
 ```
+
+**`GET /api/artifacts/pending`** — rota **obrigatória** desta fase, exigida pelo kit
+(F8): `sdd.py pull` → `GET /api/artifacts/pending?repo=<owner/name>` (e
+`&demand=<demand_id>` quando há demanda corrente).
+
+Não está no §17 do design master, mas está no fluxo do §10 e é o único ponto de
+escrita do kit no repo de dev. Sem essa rota, `pull` responde exit 4 com o
+diagnóstico `servidor sem GET /api/artifacts/pending`.
+
+- Query: `repo` (obrigatório, `owner/name`), `demand` (opcional).
+- Filtra artefatos do repo cujo `status` **não** é `stable` — o kit escreve o
+  `content` de volta no `path` relativo ao repo de dev.
+- `content` vem do banco (`artifacts.content`), já com o frontmatter atualizado
+  (o `status` do banco é a fonte; o frontmatter é espelho — §5.7).
+- 200:
+
+```json
+{"artifacts": [
+  {"id": "BR-001", "kind": "br", "path": "docs/BR/login/login.md",
+   "status": "pending", "content": "---\nid: BR-001\n…\n---\n\n# …"}
+]}
+```
+
+- `artifacts` vazio → 200 com `{"artifacts": []}` (não 404).
+- `repo` ausente → **400** `code: "invalid_request"`.
+- A rota é `authenticated` (qualquer token com `repo` correspondente).
 
 ### 4.4 `server/app/routers/commits.py`
 

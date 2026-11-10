@@ -103,6 +103,23 @@ Regra vinculante:
 A expressão é a mesma nos três lugares. Divergência entre F3 e F7 produziria `tsv`
 inconsistente e busca errada.
 
+### 4.2 Rotas de coordination entre fases (respostas às dúvidas do F8)
+
+Respostas do maestro (2026-11-10) às dúvidas do agente da F8. **Vinculantes.**
+
+| Dúvida | Resposta |
+| --- | --- |
+| (a) `GET /api/artifacts/pending` — é escopo do F4? | **Sim.** É rota do F4 (`app/routers/artifacts.py`). O F4 a expõe. Enquanto não existir, `pull` responde exit 4 com o diagnóstico — comportamento correto e esperado. |
+| (b) `POST /api/reviews` aceita o shape completo do kit? | **Sim.** O F6 aceita `sha` + `demand_id` (obrigatórios) e ignora campos extras (`verdict`, `findings`). O kit manda os 4. |
+| (c) `GET /api/skills/{id}` devolve markdown cru ou JSON? | **JSON**, conforme F3 §3.9: `{id, version, hash, description, path, content, files}`. O `content` é o markdown bruto do `SKILL.md` dentro do JSON. O kit aceitar os 3 formatos é tolerância extra, sem problema. |
+| (d) O hash do manifesto é sha256 ou md5? | **sha256 hex**, conforme F3 §3.8 / dataclass `Skill` (`hash: str  # sha256 hex da árvore da skill`). O exemplo de 32 chars da spec F8 é abreviação de doc, não md5. |
+| (e) O manifest de `/api/skills/manifest` é o mesmo corpus do repo blueprint? | **Sim.** F3 serve o diretório `skills/` do repo blueprint (`SDD_REPO_ROOT`). O kit espelha em `.claude/skills/` do repo de dev. Mesmo corpus, hash verificável. |
+| (f) O F9 pode consumir o kit assumindo JSON em stdout + exit code? | **Sim.** Contrato do kit: JSON em stdout, diagnóstico legível em stderr, decisão por exit code (0/1/2/3/4/5). O F9 consome `plugin/kit/sdd.py` por subprocesso, nunca por import. |
+
+**Decisões do F8 aceitas** (não exigem mudança): `sync` 400 → exit 4; `status` 404 →
+exit 0; normalização do `SDD_URL` (remove `/api` final); `report` sem `author` e sem
+exit 1; erros locais também em JSON no stdout.
+
 ## 5. Variáveis de ambiente
 
 Lidas por `app/config.py` (pydantic-settings). Prefixo `SDD_`.
