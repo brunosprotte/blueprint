@@ -1,0 +1,7 @@
+{
+  "demand_id": "3f1c9a2e-5b74-4d68-9a10-7c2e5b8d9f31",
+  "repo": "owner/name",
+  "spec_ids": ["SPEC-002", "SPEC-003"],
+  "br_id": "BR-013",
+  "claimed_at": "2026-11-10T12:34:56Z"
+}

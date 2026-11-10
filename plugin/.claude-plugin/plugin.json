@@ -1,0 +1,8 @@
+{
+  "name": "sdd-multi-agent",
+  "version": "0.1.0",
+  "description": "Kit de desenvolvimento Spec-Driven: acesso ao servidor de demandas SDD",
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills",
+  "mcpServers": {}
+}
