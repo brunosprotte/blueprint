@@ -110,18 +110,37 @@ plano próprios:
 | Fase | Sub-projeto | Entrega | Depende de |
 | --- | --- | --- | --- |
 | **F1** | Core do servidor | FastAPI + Postgres + schema + migrations + auth GitHub OAuth + API token | — |
-| **F2** | Linter de artefatos | `server/lint/` + regras frontmatter/AC/links/paths + `POST /api/lint` + testes | F1 |
+| **F2** | Linter de artefatos | `server/app/lint/` + regras frontmatter/AC/links/paths + `POST /api/lint` + testes | F1 |
 | **F3** | Método servido | `GET /api/method/*` servindo META/SK/ES/PAT + `skills/` + sync de skills | F1 |
 | **F4** | Demandas e ciclo de vida | `demands` + `artifacts` + transições + claim atômico + sync | F1, F2 |
 | **F5** | Geração de BR/SPEC | SK-001 + SK-002 no servidor via Claude API + grafo de SPECs | F3, F4 |
-| **F6** | Aprovação e revisão | pipeline de 3 revisores + linter + arquivo de dúvidas (META-006) | F2, F5 |
+| **F6** | Aprovação e revisão | pipeline de 3 revisores + linter + arquivo de dúvidas (META-006) | F2, F4, F5 |
 | **F7** | RAG | índice BM25 + `GET /api/knowledge` + dossiê | F4, F6 |
-| **F8** | Plugin e kit | `.claude-plugin/` + `kit/sdd.py` + skills + comandos | F3, F4 |
+| **F8** | Plugin e kit | `plugin/.claude-plugin/` + `kit/sdd.py` + skills + comandos | F3, F4 |
 | **F9** | Hook pre-push | review via `claude -p` + gate + report ao servidor | F7, F8 |
 | **F10** | Docusaurus | docs do método + demandas + painel de status vivo | F4, F6 |
 
 Cada fase é um ciclo spec → plano → implementação. Este documento cobre a arquitetura
-completa; o plano de implementação detalhado começa por F1.
+completa. As specs de fase, o contrato comum e a matriz de ownership estão em:
+
+- `design/specs/2026-11-10-contrato-comum.md` — **prevalece** sobre este documento
+  em caso de conflito (convenções, contratos de módulo, ownership, correções).
+- `design/specs/2026-11-10-fase-F1-core-servidor.md` … `…-F10-docusaurus.md`.
+
+### 6.1 Ondas de paralelismo
+
+As fases são implementadas por agentes diferentes, em paralelo, respeitando a matriz
+de ownership do contrato comum (nenhum agente edita arquivo de outro).
+
+| Onda | Fases em paralelo | Pré-requisito |
+| --- | --- | --- |
+| 0 | F1 | — |
+| 1 | F2, F3 | F1 |
+| 2 | F4 | F1, F2 |
+| 3 | F5, F8 | F3+F4 (F5) / F4 (F8) |
+| 4 | F6, F10 | F2+F4+F5 (F6) / F4+F6 (F10) |
+| 5 | F7 | F4, F6 |
+| 6 | F9 | F7, F8 |
 
 ## 7. Arquitetura do servidor
 
@@ -157,6 +176,12 @@ blueprint/
 │   └── pyproject.toml
 ├── db/
 │   └── docker-compose.yml
+├── plugin/                      fonte do kit que o dev copia pro repo dele
+│   ├── .claude-plugin/plugin.json
+│   ├── kit/sdd.py
+│   ├── kit/state.json
+│   ├── hooks/hooks.json
+│   └── skills/
 ├── site/                        Docusaurus
 ├── skills/                      skills de implementação (fonte)
 ├── tools/                       lint.py, retrieve.py (inalterados)
@@ -264,12 +289,12 @@ Transições válidas, em `services/lifecycle.py`:
 | --- | --- | --- | --- |
 | — | `open` | `POST /api/demands` | body não vazio |
 | `open` | `claimed` | `POST /api/claims` | atômico; token tem `demand:claim`; repo bate |
-| `claimed` | `in_progress` | `POST /api/claims/{id}/start` | claimed_by == token.user |
+| `claimed` | `in_progress` | `POST /api/demands/{id}/start` | claimed_by == token.user |
 | `in_progress` | `review` | `POST /api/reviews` | commit reportada |
 | `review` | `in_progress` | `POST /api/reviews` | verdict = `blocking` |
 | `review` | `merged` | `POST /api/demands/{id}/merge` | review mais recente = `clean`/`suggestions` |
 | `merged` | `done` | `POST /api/demands/{id}/close` | — |
-| `claimed` | `open` | `POST /api/claims/{id}/release` | claimed_by == token.user |
+| `claimed` | `open` | `POST /api/demands/{id}/release` | claimed_by == token.user |
 | qualquer | `blocked` | `POST /api/demands/{id}/block` | motivo obrigatório |
 
 **Claim atômico.** Duas pessoas clicando ao mesmo tempo não podem pegar a mesma demanda:
@@ -638,7 +663,6 @@ POST   /api/demands/{id}/reconcile
 ```
 POST   /api/claims                         # claim atômico
 GET    /api/claims/current
-POST   /api/claims/{id}/release
 ```
 
 ### Artefatos
