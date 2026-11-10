@@ -85,6 +85,24 @@ Headers: `X-Request-Id` em toda resposta (UUID4).
 DDL canônico: §8 do design master. As fases que criam tabela usam exatamente o DDL de lá;
 se precisarem de coluna extra, **adicionam coluna**, nunca reescrevem a tabela.
 
+### 4.1 Coluna `chunks.tsv` — regra única (F1, F3, F7)
+
+O design master §8 declara `tsv tsvector` — **coluna simples**, não generated.
+Postgres **recusa** atribuição a coluna `GENERATED ALWAYS` (inclusive via trigger), então
+`generated` quebraria o bootstrap.
+
+Regra vinculante:
+
+- **F1** cria `tsv tsvector` (coluna simples, sem default), exatamente como §8.
+- **F3** escreve o valor no `INSERT`: `to_tsvector('portuguese', coalesce(heading,'') || ' ' || coalesce(text,''))`.
+  F3 não cria trigger (não é dona de migration) e não depende de F7.
+- **F7** cria o trigger `chunks_tsv` (`BEFORE INSERT OR UPDATE OF heading, text`) na
+  migration `005`, com a **mesma** expressão do F3 — assim qualquer chunk escrito por
+  fora do F3 (dúvidas, commits, reviews) também tem `tsv` coerente.
+
+A expressão é a mesma nos três lugares. Divergência entre F3 e F7 produziria `tsv`
+inconsistente e busca errada.
+
 ## 5. Variáveis de ambiente
 
 Lidas por `app/config.py` (pydantic-settings). Prefixo `SDD_`.
