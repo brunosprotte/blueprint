@@ -339,8 +339,9 @@ Nunca gere código, nunca escolha tecnologias (a Technology Pack já vem resolvi
 regras de negócio e nunca modifique a BR.
 Cada SPEC tem responsabilidade única: 1 SPEC = 1 capacidade técnica. Minimize acoplamento;
 SPECs independentes devem poder ser implementadas em paralelo.
-Todo Acceptance Criteria da BR precisa estar em pelo menos uma SPEC, em "Acceptance Criteria
-atendidos". Nenhuma AC pode ficar sem cobertura.
+Todo Acceptance Criteria da BR precisa estar em pelo menos uma SPEC, listada na seção
+"Acceptance Criteria atendidos" do CORPO da SPEC (o ID da AC, ex.: AC-003). Nenhuma AC
+pode ficar sem cobertura.
 Complexidade de cada SPEC: LOW, MEDIUM, HIGH ou VERY HIGH.
 O corpo Markdown de cada SPEC deve conter, nesta ordem, as 14 seções: Objetivo, Escopo,
 Responsabilidade, Entradas, Saídas, Fluxo principal, Fluxos alternativos, Validações, Failures,
@@ -557,40 +558,77 @@ def repo_root() -> Path:
 _DOC_ID_RE = re.compile(r"^([A-Z]+-\d+)")
 
 
+def _f3_method_index() -> Any | None:
+    """Classe `MethodIndex` do F3 — caminho primário. `None` se o F3 não existir."""
+    try:
+        from app.services.method import MethodIndex  # F3
+    except ImportError:
+        return None
+    return MethodIndex
+
+
+def _f3_load_method_documents() -> Any | None:
+    """Carregador `load_method_documents` do F3 (outro nome) — `None` se não existir."""
+    try:
+        from app.services.method import load_method_documents  # F3
+    except ImportError:
+        return None
+    return load_method_documents
+
+
+def _f7_search() -> Any | None:
+    """Função `search` do F7 (retriever) — `None` se o F7 não existir."""
+    try:
+        from app.services.retriever import search  # F7
+    except ImportError:
+        return None
+    return search
+
+
 async def load_method_documents() -> tuple[tuple[MethodDocument, ...], bool, str | None]:
     """Carrega o corpus do método (F3). Retorna (documentos, degradado, motivo).
 
-    Sem F3, o corpus é lido localmente de `docs/` (leitura — invariante 4) e o
-    contexto sai degradado, sem falhar a geração.
+    Caminho primário: `MethodIndex` do F3 (Contrato Comum §8.4 D5). Fallback:
+    `load_method_documents` do F3 (outro nome) e, por último, a leitura local de
+    `docs/` — degradada, sem falhar a geração.
     """
-    try:
-        from app.services.method import load_method_documents as loader  # F3
-    except ImportError:
-        loader = None
-    if loader is not None:
+    index_class = _f3_method_index()
+    if index_class is not None:
         try:
-            documents = tuple(_as_method_document(doc) for doc in await loader())
-            if documents:
-                return documents, False, None
-        except Exception as exc:
-            return _load_local_method_documents(f"F3 indisponível: {exc}")
-
-    try:
-        from app.services.method import MethodIndex  # F3, nomes diferentes
-    except ImportError:
-        MethodIndex = None
-    if MethodIndex is not None:
-        try:
-            index = MethodIndex(repo_root())
-            documents = tuple(_as_method_document(doc) for doc in index.all())
+            # ponytail: um MethodIndex por chamada (re-lê docs/ do disco, ~50ms) —
+            # trocar pelo singleton do F3 quando o serviço expuser um accessor.
+            documents = tuple(
+                _as_method_document(doc)
+                for doc in index_class(repo_root()).all()
+                if not _is_catalog_doc(doc)
+            )
             if documents:
                 return documents, False, None
         except Exception:
             pass
 
+    loader = _f3_load_method_documents()
+    if loader is not None:
+        try:
+            documents = tuple(
+                _as_method_document(doc)
+                for doc in await loader()
+                if not _is_catalog_doc(doc)
+            )
+            if documents:
+                return documents, False, None
+        except Exception as exc:
+            return _load_local_method_documents(f"F3 indisponível: {exc}")
+
     return _load_local_method_documents(
         "F3 pendente: corpus do método lido localmente sem índice compartilhado"
     )
+
+
+def _is_catalog_doc(doc: Any) -> bool:
+    """`index.md`/`README.md` são catálogos de navegação, não documentos do método."""
+    name = str(getattr(doc, "path", "") or "").rsplit("/", 1)[-1].lower()
+    return name in ("index.md", "readme.md")
 
 
 def _load_local_method_documents(reason: str) -> tuple[tuple[MethodDocument, ...], bool, str | None]:
@@ -769,16 +807,15 @@ async def resolve_repo_context(repo_id: str, query: str, *, top: int = 5) -> Rep
 
     O corpus nunca cruza corpora (Contrato Comum §7.6): `corpus_id = "repo:<uuid>"`.
     """
-    corpus_id = f"repo:{repo_id}"
-    try:
-        from app.services.retriever import search  # F7
-    except ImportError:
+    search = _f7_search()
+    if search is None:
         return RepoContext(
             corpus_id=None,
             hits=(),
             degraded=True,
             degraded_reason="F7 pendente: corpus do repo indisponível",
         )
+    corpus_id = f"repo:{repo_id}"
     try:
         hits = await search(query, corpus_id, top=top)
     except Exception as exc:
@@ -995,6 +1032,13 @@ async def generate_specs_report(br: "Artifact", ctx: GenerationContext) -> Gener
                 str(spec.get("feature") or ""): ids[index] for index, spec in enumerate(specs)
             }
 
+            # As arestas são resolvidas ANTES da gravação: o `dependsOn` do
+            # frontmatter leva os IDs que o servidor alocou (Contrato Comum §8.4 D3).
+            resolved, unresolved = await _resolve_spec_edges(
+                conn, edges=payload.get("edges") or [], feature_to_id=feature_to_id
+            )
+            depends_on = _depends_on_by_spec(resolved, ids)
+
             for spec, artifact_id in zip(specs, ids):
                 feature = str(spec.get("feature") or "")
                 complexity = str(spec.get("complexity") or "MEDIUM")
@@ -1016,6 +1060,7 @@ async def generate_specs_report(br: "Artifact", ctx: GenerationContext) -> Gener
                     "status": "draft",
                     "tags": tags,
                     "complexity": complexity,
+                    "dependsOn": depends_on.get(artifact_id, []),
                     "timestamp": _now_iso(),
                     "doubtsIndex": doubts_path,
                     "version": "1.0.0",
@@ -1068,29 +1113,45 @@ async def generate_specs_report(br: "Artifact", ctx: GenerationContext) -> Gener
                     ctx=ctx,
                 )
 
-            await _insert_spec_edges(
-                conn,
-                edges=payload.get("edges") or [],
-                feature_to_id=feature_to_id,
-                demand_id=demand_id,
-            )
+            await _insert_spec_edges(conn, resolved=resolved, unresolved=unresolved, demand_id=demand_id)
 
     rows = await _find_specs_of_br(ctx.pool, br_id, demand_id)
     return await _report_from_rows(ctx, rows, created=True, usage=usage)
 
 
-async def _insert_spec_edges(
+def _depends_on_by_spec(
+    resolved: Sequence[tuple[str, str, str]],
+    ids: Sequence[str],
+) -> dict[str, list[str]]:
+    """`dependsOn` de cada SPEC: os IDs de que ela depende (Contrato Comum §8.4 D3).
+
+    Só arestas `depends_on` entram — a aresta `tests` nasce do arquivo RI (D3).
+    """
+    batch = set(ids)
+    depends_on: dict[str, list[str]] = {artifact_id: [] for artifact_id in ids}
+    for parent_id, child_id, edge_type in resolved:
+        if edge_type == "depends_on" and parent_id in batch and child_id not in depends_on[parent_id]:
+            depends_on[parent_id].append(child_id)
+    return {artifact_id: sorted(values) for artifact_id, values in depends_on.items()}
+
+
+async def _resolve_spec_edges(
     conn: Any,
     *,
     edges: Sequence[Any],
     feature_to_id: Mapping[str, str],
-    demand_id: str,
-) -> None:
-    """Grava as arestas do grafo devolvido pelo modelo (spec F5 §5.6).
+) -> tuple[list[tuple[str, str, str]], list[dict[str, str]]]:
+    """Resolve as arestas do grafo devolvido pelo modelo (spec F5 §5.6).
 
-    Aresta não resolvida **não** é gravada e gera o evento `spec_edge_unresolved`
-    (D7): perder uma aresta é recuperável, perder a SPEC inteira não.
+    Devolve (arestas resolvidas, arestas não resolvidas). Aresta não resolvida
+    **não** é gravada e gera o evento `spec_edge_unresolved` (D7 da spec F5):
+    perder uma aresta é recuperável, perder a SPEC inteira não.
+
+    Direção canônica (Contrato Comum §8.4 D4): `depends_on` tem parent = a SPEC
+    que depende, child = a dependência.
     """
+    resolved: list[tuple[str, str, str]] = []
+    unresolved: list[dict[str, str]] = []
     for raw in edges:
         edge = raw if isinstance(raw, Mapping) else {}
         edge_type = str(edge.get("type") or "")
@@ -1105,25 +1166,40 @@ async def _insert_spec_edges(
         if child_id is None:
             child_id = await _existing_spec_id(conn, child_feature)
         if parent_id is None or child_id is None:
-            await conn.execute(
-                "INSERT INTO events (demand_id, type, payload) VALUES ($1,'spec_edge_unresolved',$2::jsonb)",
-                demand_id,
-                json.dumps(
-                    {
-                        "parentFeature": parent_feature,
-                        "childFeature": child_feature,
-                        "type": edge_type,
-                        "reason": "not_resolved",
-                    }
-                ),
+            unresolved.append(
+                {
+                    "parentFeature": parent_feature,
+                    "childFeature": child_feature,
+                    "type": edge_type,
+                    "reason": "not_resolved",
+                }
             )
             continue
+        resolved.append((parent_id, child_id, edge_type))
+    return resolved, unresolved
+
+
+async def _insert_spec_edges(
+    conn: Any,
+    *,
+    resolved: Sequence[tuple[str, str, str]],
+    unresolved: Sequence[Mapping[str, str]],
+    demand_id: str,
+) -> None:
+    """Grava as arestas resolvidas e publica as não resolvidas (spec F5 §5.6)."""
+    for parent_id, child_id, edge_type in resolved:
         await conn.execute(
             "INSERT INTO spec_edges (parent_id, child_id, type) VALUES ($1,$2,$3)"
             " ON CONFLICT DO NOTHING",
             parent_id,
             child_id,
             edge_type,
+        )
+    for edge in unresolved:
+        await conn.execute(
+            "INSERT INTO events (demand_id, type, payload) VALUES ($1,'spec_edge_unresolved',$2::jsonb)",
+            demand_id,
+            json.dumps(dict(edge)),
         )
 
 
