@@ -33,11 +33,63 @@ REMOTE_URL = "https://example.com/acme/repo.git"
 DEMAND_ID = "3f6c1c8e-5a2b-4d9f-9c11-8b7e2f0a4d61"
 TOKEN = "sdd_teste_123"
 
-SH = shutil.which("sh")
-BASH = shutil.which("bash")
+GIT_ROOTS = (
+    Path(r"C:\Program Files\Git"),
+    Path(r"C:\Program Files (x86)\Git"),
+)
 
-requires_sh = pytest.mark.skipif(SH is None, reason="sem `sh` no PATH")
-requires_bash = pytest.mark.skipif(BASH is None, reason="sem `bash` no PATH")
+
+def _git_candidate(*parts: str) -> Path | None:
+    """Arquivo do Git for Windows (o git roda hooks com o `sh` dele)."""
+    for root in GIT_ROOTS:
+        candidate = root.joinpath(*parts)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _is_wsl_stub(path: str | Path) -> bool:
+    """`C:\\WINDOWS\\system32\\bash.exe` e o stub do WSL: falha com
+    `execvpe(/bin/bash) failed` quando o WSL nao esta instalado."""
+    text = str(path).lower().replace("/", "\\")
+    return text.endswith("\\bash.exe") and "\\system32\\" in text
+
+
+def _find_bash() -> str | None:
+    """Bash utilizavel: Git Bash primeiro; o `bash` do PATH so serve se nao for
+    o stub do WSL."""
+    candidate = _git_candidate("bin", "bash.exe") or _git_candidate("usr", "bin", "bash.exe")
+    if candidate:
+        return str(candidate)
+    found = shutil.which("bash")
+    if found and not _is_wsl_stub(found):
+        return found
+    return None
+
+
+def _find_sh() -> str | None:
+    """`sh` para rodar o hook (o git for Windows usa o `sh` do MSYS)."""
+    candidate = _git_candidate("usr", "bin", "sh.exe") or _git_candidate("bin", "sh.exe")
+    if candidate:
+        return str(candidate)
+    found = shutil.which("sh")
+    if found and not _is_wsl_stub(found):
+        return found
+    return None
+
+
+BASH = _find_bash()
+SH = _find_sh()
+GIT_USR_BIN = _git_candidate("usr", "bin")
+
+requires_sh = pytest.mark.skipif(
+    SH is None,
+    reason="sem `sh` utilizavel (Git for Windows ausente e `sh` fora do PATH)",
+)
+requires_bash = pytest.mark.skipif(
+    BASH is None,
+    reason="sem `bash` utilizavel (Git for Windows ausente e o `bash` do PATH e o stub do WSL)",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -115,7 +167,8 @@ import sys
 import time
 
 try:
-    received = sys.stdin.read()
+    # Bytes + UTF-8: o locale do console (cp1252) corromperia o prompt.
+    received = sys.stdin.buffer.read().decode("utf-8", "replace")
 except Exception:
     received = ""
 
@@ -145,10 +198,47 @@ payload = {
 sys.stdout.write(json.dumps(payload, ensure_ascii=False))
 '''
 
+# Formato real de `GET /api/demands/{id}` (F4): a demanda vem com `artifacts`
+# e `events`; o conteudo da SPEC vem em `GET /api/artifacts/{id}`.
+DEMAND = {
+    "id": DEMAND_ID,
+    "repo": "acme/repo",
+    "module": "auth",
+    "title": "Login com refresh token",
+    "status": "in_progress",
+    "artifacts": [
+        {
+            "id": "SPEC-001",
+            "kind": "spec",
+            "path": "docs/SPEC/auth/login.md",
+            "status": "draft",
+        },
+    ],
+    "events": [
+        {
+            "id": "ev-1",
+            "type": "claimed",
+            "payload": {},
+            "actor": "tester",
+            "at": "2026-11-10T12:00:00Z",
+        },
+    ],
+}
+
+ARTIFACTS = {
+    "SPEC-001": {
+        "id": "SPEC-001",
+        "kind": "spec",
+        "path": "docs/SPEC/auth/login.md",
+        "status": "draft",
+        "content": SPEC_DOC,
+    },
+}
+
 DOSSIER = {
     "proposta": {
         "specs": [
-            {"id": "SPEC-001", "content": SPEC_DOC},
+            {"id": "SPEC-001", "path": "docs/SPEC/auth/login.md", "status": "draft"},
         ],
     },
     "necessidade": {
@@ -178,7 +268,10 @@ def _git_optional(*args: str) -> str:
 
 
 def _path_for(bin_dir: Path | None = None, without_claude: bool = False) -> str:
-    """PATH do processo filho, opcionalmente sem qualquer `claude` instalável."""
+    """PATH do processo filho, opcionalmente sem qualquer `claude` instalável.
+
+    O `usr/bin` do Git entra na frente: e o que o git for Windows usa quando
+    roda hooks (`dirname`, `printf` e ciavem dependem dele)."""
     entries: list[str] = []
     for part in os.environ.get("PATH", "").split(os.pathsep):
         if not part:
@@ -190,6 +283,8 @@ def _path_for(bin_dir: Path | None = None, without_claude: bool = False) -> str:
         ):
             continue
         entries.append(part)
+    if GIT_USR_BIN is not None:
+        entries.insert(0, str(GIT_USR_BIN))
     if bin_dir is not None:
         entries.insert(0, str(bin_dir))
     return os.pathsep.join(entries)
@@ -253,19 +348,23 @@ def _run_reviewer(
     path: str,
     extra: dict[str, str] | None = None,
     sha: str = "deadbeef",
+    repo_root: Path | None = None,
 ) -> subprocess.CompletedProcess:
     env = _base_env(path)
     env["SDD_URL"] = api_url
     env["SDD_TOKEN"] = token
     env.update(extra or {})
+    command = [
+        sys.executable,
+        str(kit / "reviewer.py").replace("\\", "/"),
+        "--demand", DEMAND_ID,
+        "--sha", sha,
+        "--json",
+    ]
+    if repo_root is not None:
+        command += ["--repo-root", str(repo_root)]
     return subprocess.run(
-        [
-            sys.executable,
-            str(kit / "reviewer.py").replace("\\", "/"),
-            "--demand", DEMAND_ID,
-            "--sha", sha,
-            "--json",
-        ],
+        command,
         cwd=str(kit),
         capture_output=True,
         text=True,
@@ -345,6 +444,15 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - nome imposto pelo BaseHTTPRequestHandler
         if self.path.startswith("/api/knowledge/dossier/"):
             self._respond(200, self.server.dossier)  # type: ignore[attr-defined]
+        elif self.path.startswith("/api/demands/"):
+            self._respond(200, self.server.demand)  # type: ignore[attr-defined]
+        elif self.path.startswith("/api/artifacts/"):
+            artifact_id = self.path.rsplit("/", 1)[-1]
+            artifact = self.server.artifacts.get(artifact_id)  # type: ignore[attr-defined]
+            if artifact is None:
+                self._respond(404, {"error": {"code": "not_found"}})
+            else:
+                self._respond(200, artifact)
         else:
             self._respond(404, {"error": {"code": "not_found"}})
 
@@ -368,6 +476,8 @@ class _Server(ThreadingHTTPServer):
         super().__init__(*args, **kwargs)
         self.requests: list[dict[str, Any]] = []
         self.dossier: dict[str, Any] = json.loads(json.dumps(DOSSIER))
+        self.demand: dict[str, Any] = json.loads(json.dumps(DEMAND))
+        self.artifacts: dict[str, Any] = json.loads(json.dumps(ARTIFACTS))
 
 
 @pytest.fixture
@@ -808,8 +918,13 @@ def test_reviewer_posts_review_with_contract_shape(
 
 
 def test_reviewer_prompt_carries_spec_and_diff(
-    kit_dir: Path, api_server: Any, claude_bin: Path, tmp_path: Path
+    git_repo: SimpleNamespace,
+    kit_dir: Path,
+    api_server: Any,
+    claude_bin: Path,
+    tmp_path: Path,
 ) -> None:
+    """O prompt leva o id da SPEC (via `artifacts` da demanda) e o diff do sha."""
     prompt_file = tmp_path / "prompt.txt"
     proc = _run_reviewer(
         kit_dir,
@@ -817,21 +932,61 @@ def test_reviewer_prompt_carries_spec_and_diff(
         TOKEN,
         _path_for(claude_bin),
         {"SDD_TEST_CLAUDE_PROMPT_FILE": str(prompt_file)},
-        sha="abc1234",
+        sha=git_repo.feature,
+        repo_root=git_repo.root,
     )
 
     assert proc.returncode == 0, proc.stderr
     prompt = prompt_file.read_text(encoding="utf-8")
     assert "SPEC-001" in prompt
     assert "AC-001" in prompt
+    assert "diff --git" in prompt
+    assert "linha nova" in prompt
 
 
 # --------------------------------------------------------------------------- #
-# Requisito sobre o kit do F8 (ainda nao existe neste worktree)
+# Contrato com o kit do F8: `sdd.py review` delega ao reviewer da F9
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.skip(reason="F8 pendente")
-def test_kit_review_delegates_to_reviewer() -> None:
-    kit = REPO_ROOT / "plugin" / "kit" / "sdd.py"
-    assert kit.is_file()
-    assert "reviewer" in kit.read_text(encoding="utf-8")
+def test_kit_review_delegates_to_reviewer(
+    git_repo: SimpleNamespace, api_server: Any, claude_bin: Path
+) -> None:
+    """O kit real do F8 roda o reviewer real da F9 (nada de dummies)."""
+    kit = git_repo.root / "kit"
+    kit.mkdir()
+    shutil.copy(REPO_ROOT / "plugin" / "kit" / "sdd.py", kit / "sdd.py")
+    shutil.copy(REVIEWER_SOURCE, kit / "reviewer.py")
+    (kit / "state.json").write_text(
+        json.dumps({"demand_id": DEMAND_ID, "repo": "acme/repo"}), encoding="utf-8"
+    )
+
+    findings = [
+        {
+            "severity": "suggestion",
+            "title": "achado do reviewer",
+            "detail": "detalhe",
+            "ac": "AC-001",
+            "suggestion": "ajuste",
+        }
+    ]
+    env = _base_env(_path_for(claude_bin))
+    env["SDD_URL"] = _api_url(api_server)
+    env["SDD_TOKEN"] = TOKEN
+    env["SDD_TEST_CLAUDE_RESULT"] = json.dumps(findings)
+
+    proc = subprocess.run(
+        [sys.executable, str(kit / "sdd.py").replace("\\", "/"), "review"],
+        cwd=str(git_repo.root),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["verdict"] == "suggestions"
+    assert payload["findings"][0]["title"] == "achado do reviewer"
+    reviews = [r for r in api_server.requests if r["path"] == "/api/reviews"]
+    assert len(reviews) == 1
+    assert reviews[0]["body"]["verdict"] == "suggestions"
+    assert reviews[0]["body"]["findings"][0]["title"] == "achado do reviewer"

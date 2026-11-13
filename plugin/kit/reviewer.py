@@ -83,6 +83,17 @@ class TransportError(Exception):
     """Servidor inacessível (rede, DNS, timeout, corpo não-JSON)."""
 
 
+def force_utf8(stream: object) -> None:
+    """Garante UTF-8 na saida: o JSON tem acento e o console legado (cp1252)
+    quebraria com UnicodeEncodeError. Mesmo remedy do kit (F8)."""
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def _warn(message: str) -> None:
     print(f"[sdd] {message}", file=sys.stderr)
 
@@ -284,11 +295,12 @@ def call_claude(prompt: str, timeout: int) -> tuple[str | None, float, bool]:
     if exe.lower().endswith((".cmd", ".bat")):
         command = ["cmd", "/c"] + command
     try:
+        # Prompt em bytes UTF-8: `text=True` usaria a codificacao do locale
+        # (cp1252 no Windows) e o CLI leria bytes corrompidos.
         proc = subprocess.run(
             command,
-            input=prompt,
+            input=prompt.encode("utf-8"),
             capture_output=True,
-            text=True,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -297,11 +309,14 @@ def call_claude(prompt: str, timeout: int) -> tuple[str | None, float, bool]:
     except OSError as exc:
         _warn(f"Claude Code indisponível ({exc}) — revisão ignorada.")
         return None, 0.0, False
+    stdout = (proc.stdout or b"").decode("utf-8", "replace")
+    stderr = (proc.stderr or b"").decode("utf-8", "replace").strip()
     if proc.returncode != 0:
-        _warn(f"claude -p falhou (exit {proc.returncode}) — revisão ignorada.")
+        detail = f": {stderr[:200]}" if stderr else ""
+        _warn(f"claude -p falhou (exit {proc.returncode}){detail} — revisão ignorada.")
         return None, 0.0, False
     try:
-        payload = json.loads(proc.stdout or "")
+        payload = json.loads(stdout or "")
     except ValueError:
         _warn("resposta do claude -p não é JSON — revisão ignorada.")
         return None, 0.0, False
@@ -441,6 +456,23 @@ def _resolve_token() -> str:
 # SPEC / ACs
 # --------------------------------------------------------------------------- #
 
+def _spec_entries(items: list) -> list[dict]:
+    """SPECs de uma lista de artefatos.
+
+    Aceita o formato de `GET /api/demands/{id}` (`artifacts` com `kind`/`id`) e
+    o do dossie do F7 (`proposta.specs`, so com `id`)."""
+    entries: list[dict] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        spec_id = str(item.get("id") or "").strip()
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind != "spec" and not spec_id.upper().startswith("SPEC-"):
+            continue
+        entries.append(item)
+    return entries
+
+
 def _collect_specs(
     specs: list, base_url: str, token: str
 ) -> str:
@@ -574,6 +606,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
+    force_utf8(sys.stdout)
+    force_utf8(sys.stderr)
     args = _build_parser().parse_args(argv)
 
     demand_id = (args.demand or "").strip()
@@ -597,11 +631,17 @@ def main(argv: list[str]) -> int:
         _warn("sha não identificável")
         return EXIT_USAGE
 
-    # --- SPEC e ACs da demanda (dossiê do F7) ------------------------------ #
+    # --- SPEC e ACs da demanda ---------------------------------------------- #
+    # A demanda vem do F4 (`GET /api/demands/{id}` -> `artifacts` + `events`);
+    # os ACs vem do dossie do F7. Cada rota e consumida no formato real.
+    quoted = urllib.parse.quote(demand_id)
+    specs: list[dict] = []
+    acs: list[str] = []
+
     try:
-        status, dossier = _http(
+        demand_status, demand = _http(
             "GET",
-            f"/api/knowledge/dossier/{urllib.parse.quote(demand_id)}",
+            f"/api/demands/{quoted}",
             base_url=base_url,
             token=token,
         )
@@ -610,29 +650,50 @@ def main(argv: list[str]) -> int:
         _emit(_pending())
         return EXIT_OK
 
-    if status == 404:
+    if demand_status in (401, 403):
+        _warn(f"sem permissão para ler a demanda (HTTP {demand_status}) — revisão ignorada.")
+        return EXIT_AUTH
+    if demand_status == 404:
         _warn("demanda inexistente no servidor — revisão ignorada.")
         return EXIT_NO_DEMAND
-    if status in (401, 403):
-        _warn(f"sem permissão para ler o dossiê (HTTP {status}) — revisão ignorada.")
-        return EXIT_AUTH
-    if status >= 400:
-        _warn(f"dossiê indisponível (HTTP {status}) — revisão ignorada.")
+    if demand_status == 200 and isinstance(demand, dict):
+        specs = _spec_entries(demand.get("artifacts") or [])
+    elif demand_status >= 400:
+        _warn(f"demanda indisponível (HTTP {demand_status}) — revisão ignorada.")
         _emit(_pending())
         return EXIT_OK
 
-    if not isinstance(dossier, dict):
-        dossier = {}
-    proposta = dossier.get("proposta") if isinstance(dossier.get("proposta"), dict) else {}
-    necessidade = dossier.get("necessidade") if isinstance(dossier.get("necessidade"), dict) else {}
+    try:
+        dossier_status, dossier = _http(
+            "GET",
+            f"/api/knowledge/dossier/{quoted}",
+            base_url=base_url,
+            token=token,
+        )
+    except TransportError as exc:
+        _warn(f"dossiê indisponível ({exc}) — revisão ignorada.")
+        _emit(_pending())
+        return EXIT_OK
 
-    spec_text = _collect_specs(proposta.get("specs") or [], base_url, token)
+    if dossier_status in (401, 403):
+        _warn(f"sem permissão para ler o dossiê (HTTP {dossier_status}) — revisão ignorada.")
+        return EXIT_AUTH
+    if dossier_status == 404 and demand_status != 200:
+        _warn("demanda inexistente no servidor — revisão ignorada.")
+        return EXIT_NO_DEMAND
+    if dossier_status == 200 and isinstance(dossier, dict):
+        proposta = dossier.get("proposta") if isinstance(dossier.get("proposta"), dict) else {}
+        necessidade = dossier.get("necessidade") if isinstance(dossier.get("necessidade"), dict) else {}
+        acs = _collect_acs(necessidade.get("acs") or [])
+        if not specs:
+            specs = _spec_entries(proposta.get("specs") or [])
+
+    spec_text = _collect_specs(specs, base_url, token)
     if not spec_text.strip():
         _warn("nenhuma SPEC encontrada para a demanda — review ignorado")
         _emit(_pending())
         return EXIT_OK
 
-    acs = _collect_acs(necessidade.get("acs") or [])
     diff_text = _git_diff(repo_root, sha)
 
     result = review(
