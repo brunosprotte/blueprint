@@ -685,6 +685,12 @@ POST   /api/reviews                        # {sha, verdict, findings[]}
 GET    /api/reviews?demand=
 ```
 
+### Geração
+```
+POST   /api/generation/demands/{id}/br         # BR nova para a demanda
+POST   /api/generation/artifacts/{id}/specs    # SPECs derivadas de uma BR
+```
+
 ### Conhecimento
 ```
 GET    /api/knowledge?q=&repo=&top=
