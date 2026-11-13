@@ -85,7 +85,7 @@ class TransportError(Exception):
 
 def force_utf8(stream: object) -> None:
     """Garante UTF-8 na saida: o JSON tem acento e o console legado (cp1252)
-    quebraria com UnicodeEncodeError. Mesmo remedy do kit (F8)."""
+    quebraria com UnicodeEncodeError. Mesma correcao do kit (F8)."""
     reconfigure = getattr(stream, "reconfigure", None)
     if reconfigure:
         try:
@@ -659,9 +659,9 @@ def main(argv: list[str]) -> int:
     if demand_status == 200 and isinstance(demand, dict):
         specs = _spec_entries(demand.get("artifacts") or [])
     elif demand_status >= 400:
-        _warn(f"demanda indisponível (HTTP {demand_status}) — revisão ignorada.")
-        _emit(_pending())
-        return EXIT_OK
+        # A demanda pode falhar por id invalido (400) ou erro do servidor: o
+        # dossie ainda entrega as SPECs.
+        _warn(f"demanda indisponível (HTTP {demand_status}) — tentando o dossiê.")
 
     try:
         dossier_status, dossier = _http(
