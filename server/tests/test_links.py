@@ -21,6 +21,7 @@ from app.lint import (  # noqa: E402
     ArtifactDoc,
     CompositeUniverse,
     MethodCorpus,
+    SyncedArtifacts,
     lint_document,
     parse_document,
 )
@@ -44,6 +45,33 @@ class SyncedStub:
         if candidate in self._by_path:
             return self._by_path[candidate]
         return self._by_id.get(candidate.upper())
+
+
+class SyncedPoolStub:
+    """Pool mínimo — ``SyncedArtifacts.refresh`` só precisa de ``fetch``."""
+
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+
+    async def fetch(self, query: str, *args):
+        return self._rows
+
+
+def synced_with_doubts(doubts_index: str) -> SyncedArtifacts:
+    """``SyncedArtifacts`` com um sidecar de dúvidas em `artifacts.doubts_index`."""
+    synced = SyncedArtifacts(
+        SyncedPoolStub(
+            [
+                {
+                    "id": "BR-777",
+                    "path": "docs/BR/login/autenticacao.md",
+                    "content": None,
+                    "doubts_index": doubts_index,
+                }
+            ]
+        )
+    )
+    return synced
 
 
 @pytest.fixture
@@ -201,6 +229,54 @@ def test_doubts_index_resolved(universe):
     findings = lint_document(doc_, universe)
     assert links_of(findings, "doubtsIndex") == []
     assert not any(finding.rule == "PATH-002" for finding in findings)
+
+
+# --------------------------------------------------------------------------- #
+# Sidecar de dúvidas (contrato §8.4 D1)
+# --------------------------------------------------------------------------- #
+
+
+async def test_synced_artifacts_resolves_doubts_sidecar():
+    """O sidecar **nunca** vira linha de `artifacts` — o path dele vive em
+    `artifacts.doubts_index`, e é o universo que o resolve."""
+    sidecar = "docs/implementation-artifacts/duvidas-br/BR-777.md"
+    synced = synced_with_doubts(sidecar)
+    await synced.refresh()
+
+    assert synced.exists(sidecar)
+    assert synced.resolve(sidecar) == sidecar
+    assert not synced.exists("docs/implementation-artifacts/duvidas-br/BR-404.md")
+
+
+async def test_path002_doubts_index_resolved_from_doubts_index_column(universe):
+    """Um `doubtsIndex` que só existe em `artifacts.doubts_index` passa."""
+    sidecar = "docs/implementation-artifacts/duvidas-br/BR-777.md"
+    synced = synced_with_doubts(sidecar)
+    await synced.refresh()
+
+    doc_ = doc(
+        "docs/BR/login/autenticacao.md",
+        {**BR_FRONTMATTER, "doubtsIndex": sidecar},
+        "## Objetivo\n\nDúvidas sincronizadas.\n",
+    )
+    findings = lint_document(doc_, CompositeUniverse(universe, synced))
+    assert not any(finding.rule == "PATH-002" for finding in findings)
+    assert links_of(findings, "doubtsIndex") == []
+
+
+async def test_path002_doubts_index_unknown_still_fails(universe):
+    """Um `doubtsIndex` que não existe em lugar nenhum continua dando erro."""
+    synced = synced_with_doubts("docs/implementation-artifacts/duvidas-br/BR-777.md")
+    await synced.refresh()
+
+    doc_ = doc(
+        "docs/BR/login/autenticacao.md",
+        {**BR_FRONTMATTER, "doubtsIndex": "docs/implementation-artifacts/duvidas-br/BR-404.md"},
+        "## Objetivo\n\nSem arquivo de dúvidas.\n",
+    )
+    findings = lint_document(doc_, CompositeUniverse(universe, synced))
+    assert any(finding.rule == "PATH-002" for finding in findings)
+    assert links_of(findings, "doubtsIndex")
 
 
 # --------------------------------------------------------------------------- #
