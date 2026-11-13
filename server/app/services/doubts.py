@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import uuid as _uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,7 @@ __all__ = [
     "ArtifactNotFound",
     "DOUBT_SOURCES",
     "DoubtNotFound",
+    "as_uuid",
     "catalog_path",
     "doubts_file_path",
     "list_doubts",
@@ -171,6 +173,18 @@ def to_iso(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def as_uuid(value: Any) -> Any:
+    """`str`/`UUID` -> `uuid.UUID` (o Postgres exige o tipo, não o texto).
+
+    `None` passa intacto — coluna nullable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, _uuid.UUID):
+        return value
+    return _uuid.UUID(str(value))
 
 
 def _sha256(text: str) -> str:
@@ -344,11 +358,11 @@ async def _publish_event(
 ) -> None:
     await _execute(
         _SQL_EVENT,
-        demand_id,
+        as_uuid(demand_id),
         artifact_id,
         event_type,
         json.dumps(payload, ensure_ascii=False),
-        actor,
+        as_uuid(actor),
     )
 
 
