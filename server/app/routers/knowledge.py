@@ -13,8 +13,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
+from app import db
 from app.auth import current_repo, require_user
-from app.db import fetchrow, get_pool
 from app.services.indexer import METHOD_CORPUS
 from app.services.retriever import build_dossier, search
 
@@ -49,7 +49,7 @@ def _hit_payload(hit: Any) -> dict:
 
 async def _resolve_repo(pool: Any, repo: str) -> Any:
     owner, _, name = repo.partition("/")
-    return await fetchrow(
+    return await db.fetchrow(
         pool, "SELECT id, owner, name FROM repos WHERE owner = $1 AND name = $2", owner, name
     )
 
@@ -77,7 +77,7 @@ async def knowledge_search(
     """Busca no corpus `method` (sem `repo`) ou no corpus do repo (`repo:<uuid>`)."""
     corpus_id = METHOD_CORPUS
     if repo:
-        pool = await get_pool()
+        pool = await db.get_pool()
         row = await _resolve_repo(pool, repo)
         if row is None:
             return _error(404, "repo_not_found", "repo não registrado")
@@ -97,8 +97,8 @@ async def knowledge_dossier(
     caller_repo: str = Depends(_caller_repo),
 ):
     """Dossiê da demanda: necessidade, proposta, implementação e desvios."""
-    pool = await get_pool()
-    demand = await fetchrow(
+    pool = await db.get_pool()
+    demand = await db.fetchrow(
         pool,
         "SELECT d.id, r.owner, r.name FROM demands d "
         "JOIN repos r ON r.id = d.repo_id WHERE d.id = $1",
