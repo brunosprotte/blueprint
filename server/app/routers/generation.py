@@ -73,7 +73,10 @@ async def _pool() -> Any:
     """
     if get_pool is None:
         raise _error(503, "core_unavailable", "core do servidor indisponível (F1 pendente)")
-    return await get_pool()
+    try:
+        return await get_pool()
+    except RuntimeError as exc:
+        raise _error(503, "database_unavailable", str(exc)) from exc
 
 
 async def handle_generate_br(
