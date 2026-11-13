@@ -433,6 +433,16 @@ async def test_generate_br_creates_doubts_file(pool, demand) -> None:
     assert "Pendências: 1" in content
     assert "| id | status | source | question | raised_at | resolved_at |" in content
 
+    # O arquivo também é publicado em `events.payload` (sem tabela nova) e o
+    # conteúdo publicado é byte a byte o devolvido na rota.
+    published = json.loads(
+        await pool.fetchval(
+            "SELECT payload FROM events WHERE type = 'doubts_file_rendered' ORDER BY id DESC LIMIT 1"
+        )
+    )
+    assert published["path"] == doubts_file["path"]
+    assert published["content"] == content
+
 
 @pytest.mark.asyncio
 async def test_generate_br_open_questions_become_doubt_rows(pool, demand) -> None:

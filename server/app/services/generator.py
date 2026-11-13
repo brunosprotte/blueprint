@@ -903,6 +903,12 @@ async def generate_br_report(demand: "Demand", ctx: GenerationContext) -> Genera
                     artifact_id,
                     question,
                 )
+            await _publish_doubts_file(
+                conn,
+                demand_id=demand_id,
+                artifact_id=artifact_id,
+                doubts_path=doubts_path,
+            )
             await _insert_generated_event(
                 conn,
                 demand_id=demand_id,
@@ -1030,6 +1036,12 @@ async def generate_specs_report(br: "Artifact", ctx: GenerationContext) -> Gener
                         artifact_id,
                         question,
                     )
+                await _publish_doubts_file(
+                    conn,
+                    demand_id=demand_id,
+                    artifact_id=artifact_id,
+                    doubts_path=doubts_path,
+                )
                 # Toda SPEC deriva da BR de origem (spec F5 §5.6).
                 await conn.execute(
                     "INSERT INTO spec_edges (parent_id, child_id, type) VALUES ($1,$2,'derives_from')"
@@ -1115,6 +1127,42 @@ async def _existing_spec_id(conn: Any, value: str) -> str | None:
     return await conn.fetchval(
         "SELECT id FROM artifacts WHERE id = $1 AND kind = 'spec'", value
     )
+
+
+async def _publish_doubts_file(
+    conn: Any,
+    *,
+    demand_id: str,
+    artifact_id: str,
+    doubts_path: str,
+) -> str:
+    """Publica o arquivo de dúvidas do artefato em `events.payload`.
+
+    Não há tabela para o arquivo de dúvidas: o canal de publicação é o evento
+    (mesmo formato do F6). O `pull` do F4 lê o último `doubts_file_rendered` do
+    artefato e escreve o arquivo no repo de dev.
+    """
+    rows = await conn.fetch(
+        "SELECT id, status, source, question, raised_at, resolved_at"
+        " FROM doubts WHERE artifact_id = $1 ORDER BY raised_at, id",
+        artifact_id,
+    )
+    content = render_doubts_seed(artifact_id, "draft", rows)
+    await conn.execute(
+        "INSERT INTO events (demand_id, artifact_id, type, payload)"
+        " VALUES ($1,$2,'doubts_file_rendered',$3::jsonb)",
+        demand_id,
+        artifact_id,
+        json.dumps(
+            {
+                "artifact_id": artifact_id,
+                "path": doubts_path,
+                "content": content,
+                "sha": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            }
+        ),
+    )
+    return content
 
 
 async def _insert_generated_event(
@@ -1311,19 +1359,22 @@ async def _report_from_rows(
                 "doubts_index_path": doubts_path,
             }
         )
-        doubts = await ctx.pool.fetch(
-            "SELECT id, status, source, question, raised_at, resolved_at"
-            " FROM doubts WHERE artifact_id = $1 ORDER BY raised_at, id",
+        published = await ctx.pool.fetchval(
+            "SELECT payload->>'content' FROM events"
+            " WHERE artifact_id = $1 AND type = 'doubts_file_rendered'"
+            " ORDER BY id DESC LIMIT 1",
             row["id"],
         )
-        doubts_files.append(
-            DoubtsFile(
-                path=doubts_path,
-                content=render_doubts_seed(
-                    row["id"], _doubts_file_status(row["status"]), doubts
-                ),
+        if published is None:
+            doubts = await ctx.pool.fetch(
+                "SELECT id, status, source, question, raised_at, resolved_at"
+                " FROM doubts WHERE artifact_id = $1 ORDER BY raised_at, id",
+                row["id"],
             )
-        )
+            published = render_doubts_seed(
+                row["id"], _doubts_file_status(row["status"]), doubts
+            )
+        doubts_files.append(DoubtsFile(path=doubts_path, content=str(published)))
         for edge in await ctx.pool.fetch(
             "SELECT parent_id, child_id, type FROM spec_edges"
             " WHERE parent_id = $1 OR child_id = $1",
