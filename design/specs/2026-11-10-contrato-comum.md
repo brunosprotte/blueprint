@@ -412,6 +412,66 @@ Já usado em: `app/services/lifecycle.py` (F4), `app/services/retriever.py` e
 | --- | --- | --- |
 | F1 `db.py` | — | pool **sem** codec de `jsonb`; normalização é responsabilidade do service que lê |
 
+### 8.4 Rulings de integração (2026-11-13) — F4 e F5 em conflito, benchmarking resolvido
+
+Respostas do maestro às dúvidas dos agentes do F4 e do F5, depois do primeiro
+merge das 10 fases. **Vinculantes.**
+
+**D1 — o arquivo de duvidas (sidecar) nunca vira linha de `artifacts`.**
+`classify_path` continua mapeando só `docs/BR|SPEC|RI/**`; o sidecar em
+`docs/implementation-artifacts/duvidas-*/**` fica fora da tabela. O que muda é
+o **universo do linter**: no `sync`, o universo é montado sobre o **repo do dev**
+(o repo que está sendo sincronizado), não sobre o repo blueprint.
+`MethodCorpus(repo_path)` já varre `repo_path/docs` e indexa o sidecar com path
+relativo `docs/implementation-artifacts/...` — exatamente o formato do
+`doubtsIndex` que o PATH-002 resolve. Correção no F4: `build_universe` passa a
+receber o path do repo e usa `MethodCorpus(repo_path)` (**não**
+`MethodCorpus(repo_path / "docs")`, que produzia corpus vazio por `docs/docs`).
+A tabela `doubts` (linhas de pergunta) continua intocada pelo F4.
+
+**D2 — formato do arquivo de duvidas: canônico v1, em todo lugar.**
+O F4 **não** renderiza mais o próprio template. Ele chama o renderizador do F6
+(`app.services.doubts.render_doubts_file`) por **import tardio**, igual ao
+`reviewers.run_pipeline`. Se o F6 não estiver disponível, **não** se escreve
+arquivo de duvidas — nunca um arquivo em formato errado.
+
+**D3 — `dependsOn` volta para o frontmatter da SPEC.**
+O grafo tem duas fontes, com papéis distintos:
+- **`spec_edges` (DB)** — fonte de verdade para *consultas* (dossiê do F7).
+- **frontmatter** — fonte de verdade para o *linter*, que valida artefato isolado.
+O F5 escreve `dependsOn` no frontmatter da SPEC **com os IDs que o servidor
+alocou** (o F5 já resolve esses IDs ao montar o grafo). O frontmatter da SPEC
+passa de 15 para **16 campos** (SK-002 §15 + `complexity` + `dependsOn`).
+`tests` **não** vai no frontmatter da SPEC: a aresta nasce do arquivo **RI**
+(o frontmatter do RI lista as SPECs que ele testa) e o F4 a cria no `sync`.
+Consequência: SPEC-004 (ciclo) e o `stabilize` (que exige aresta `tests` para
+um RI) passam a ter dado no frontmatter do repo.
+
+**D4 — direção das arestas (canônico).**
+`spec_edges(parent_id, child_id, type)`:
+- `derives_from` → **parent = SPEC, child = BR** (a SPEC deriva da BR).
+- `depends_on` → **parent = dependente, child = dependência**.
+O código do F5 segue isso. O `_sync_edges` do F4 está **invertido** e precisa
+ser corrigido. O exemplo da spec F5 §5.9 (`parent=BR-013/child=SPEC-024`) está
+errado e a spec F5 deve ser corrigida.
+
+**D5 — nomes do F3: sem mudança.**
+`app/services/method.py` expõe `MethodIndex` (`.all()` / `.get()`) — é isso que
+existe. O adaptador `resolve_method_context` do F5 fica, com `MethodIndex` como
+caminho primário e a leitura local de `docs/` como fallback degradado.
+
+**D6 — o linter roda em LOTE, nunca documento a documento.**
+`BR-004` (toda AC da BR coberta por alguma SPEC) só faz sentido com as SPECs do
+mesmo lote. O `sync` do F4 agrupa os artefatos sincronizados e chama
+`lint_batch` sobre (BR + suas SPECs). Documento isolado **sem** SPEC no lote →
+BR-004 não é aplicável (não vira erro).
+
+**D7 — acceptance criteria no corpo, não no frontmatter.**
+As ACs ficam na seção "Acceptance Criteria" do corpo da SPEC (16 campos de
+frontmatter, sem `acceptanceCriteria`). O BR-004 do F2 lê as ACs do corpo da BR
+e a cobertura das SPECs. A garantia de que o modelo lista as ACs no corpo é do
+prompt (SK-002), não do frontmatter.
+
 ## 9. Dependências e ondas de paralelismo
 
 ```
