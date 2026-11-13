@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import anthropic
+import asyncpg
 import yaml
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para tipagem
@@ -33,6 +34,7 @@ if TYPE_CHECKING:  # pragma: no cover - apenas para tipagem
 __all__ = [
     "BR_SCHEMA",
     "BR_SYSTEM_PROMPT",
+    "ArtifactPathConflict",
     "GenerationContext",
     "GenerationReport",
     "InvalidArtifactPath",
@@ -124,6 +126,14 @@ class IllegalDemandState(RuntimeError):
         super().__init__(f"{current} -> {target}")
         self.current = current
         self.target = target
+
+
+class ArtifactPathConflict(RuntimeError):
+    """Já existe um artefato do repo com o mesmo path (índice único do F4)."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(f"path já usado por outro artefato: {path}")
+        self.path = path
 
 
 @dataclass(frozen=True)
@@ -927,19 +937,22 @@ async def generate_br_report(demand: "Demand", ctx: GenerationContext) -> Genera
             content = render_document(frontmatter, artifact_body)
             sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
             path = f"docs/BR/{module}/{feature}.md"
-            await conn.execute(
-                "INSERT INTO artifacts (id, demand_id, repo_id, kind, module, feature, path, sha,"
-                " status, version, content) VALUES ($1,$2,$3,'br',$4,$5,$6,$7,'draft',$8,$9)",
-                artifact_id,
-                demand_id,
-                ctx.repo_id or None,
-                module,
-                feature,
-                path,
-                sha,
-                "1.0.0",
-                content,
-            )
+            try:
+                await conn.execute(
+                    "INSERT INTO artifacts (id, demand_id, repo_id, kind, module, feature, path, sha,"
+                    " status, version, content) VALUES ($1,$2,$3,'br',$4,$5,$6,$7,'draft',$8,$9)",
+                    artifact_id,
+                    demand_id,
+                    ctx.repo_id or None,
+                    module,
+                    feature,
+                    path,
+                    sha,
+                    "1.0.0",
+                    content,
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise ArtifactPathConflict(path) from exc
             for question in questions:
                 await conn.execute(
                     "INSERT INTO doubts (artifact_id, question, status, source)"
@@ -1068,19 +1081,22 @@ async def generate_specs_report(br: "Artifact", ctx: GenerationContext) -> Gener
                 content = render_document(frontmatter, str(spec.get("body") or ""))
                 sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 path = f"docs/SPEC/{module}/{feature}.md"
-                await conn.execute(
-                    "INSERT INTO artifacts (id, demand_id, repo_id, kind, module, feature, path, sha,"
-                    " status, version, content) VALUES ($1,$2,$3,'spec',$4,$5,$6,$7,'draft',$8,$9)",
-                    artifact_id,
-                    demand_id,
-                    ctx.repo_id or None,
-                    module,
-                    feature,
-                    path,
-                    sha,
-                    "1.0.0",
-                    content,
-                )
+                try:
+                    await conn.execute(
+                        "INSERT INTO artifacts (id, demand_id, repo_id, kind, module, feature, path, sha,"
+                        " status, version, content) VALUES ($1,$2,$3,'spec',$4,$5,$6,$7,'draft',$8,$9)",
+                        artifact_id,
+                        demand_id,
+                        ctx.repo_id or None,
+                        module,
+                        feature,
+                        path,
+                        sha,
+                        "1.0.0",
+                        content,
+                    )
+                except asyncpg.UniqueViolationError as exc:
+                    raise ArtifactPathConflict(path) from exc
                 for question in extract_open_questions(str(spec.get("body") or "")):
                     await conn.execute(
                         "INSERT INTO doubts (artifact_id, question, status, source)"
