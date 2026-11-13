@@ -15,6 +15,7 @@ from app.services.lifecycle import (
     ApiError,
     IllegalTransition,
     apply_demand_transition,
+    as_json,
     as_uuid,
     can_transition,
     record_event,
@@ -159,8 +160,14 @@ async def get_demand(pool, demand_id: str) -> dict | None:
         as_uuid(demand_id),
     )
     demand["artifacts"] = [row_to_dict(a) for a in artifacts]
-    demand["events"] = [row_to_dict(e) for e in events]
+    demand["events"] = [_event_row(e) for e in events]
     return demand
+
+
+def _event_row(row) -> dict:
+    event = row_to_dict(row)
+    event["payload"] = as_json(event.get("payload"))
+    return event
 
 
 async def _load_demand(pool, demand_id: str) -> dict:

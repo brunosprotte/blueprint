@@ -25,6 +25,11 @@ SHA_PATTERN = re.compile(r"^[0-9a-f]{7,40}$")
 
 def normalize_files(files) -> list[dict]:
     """`[{"path", "additions", "deletions"}]` — só o que o DDL guarda."""
+    if isinstance(files, str):
+        try:
+            files = json.loads(files)
+        except (TypeError, ValueError):
+            return []
     normalized: list[dict] = []
     for item in files or []:
         if not isinstance(item, dict):
@@ -187,5 +192,6 @@ async def list_commits(
         name = data.pop("name", None)
         if owner and name:
             data["repo"] = f"{owner}/{name}"
+        data["files"] = normalize_files(data.get("files"))
         out.append(data)
     return out

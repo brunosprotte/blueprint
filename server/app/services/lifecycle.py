@@ -192,6 +192,16 @@ def jsonable(value: Any) -> Any:
     return value
 
 
+def as_json(value: Any) -> Any:
+    """jsonb chega como `str` quando o pool não tem codec — normaliza."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
 def row_to_dict(row: Any) -> dict:
     """Linha asyncpg → dict serializável."""
     if row is None:
