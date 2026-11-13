@@ -49,7 +49,7 @@ async def record_commit(
         raise ApiError(
             "invalid_repo",
             "token sem repo: o repo do commit vem do token — use um token de API "
-            "preso a um repo (owner/name) ou uma sessão web",
+            "preso a um repo (owner/name) para registrar o commit",
             400,
             {"repo": None},
         )

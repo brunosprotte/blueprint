@@ -248,31 +248,31 @@ async def _next_artifact_id(conn, kind: str) -> str:
     return f"{prefix}-{int(row['next']):03d}"
 
 
-def doubts_index_path(kind: str, artifact_id: str) -> str:
-    """Caminho do arquivo de dúvidas do artefato (convenção do F6/META-005)."""
+def _f6_doubts_function(name: str):
+    """Função do serviço de dúvidas do F6 — `None` enquanto o F6 não existir."""
     try:
         from app.services import doubts as doubts_service
-
-        path_fn = getattr(doubts_service, "doubts_file_path", None)
-        if path_fn is not None:
-            return path_fn(artifact_id, kind)
     except ImportError:
-        pass
+        return None
+    return getattr(doubts_service, name, None)
+
+
+def doubts_index_path(kind: str, artifact_id: str) -> str:
+    """Caminho do arquivo de dúvidas do artefato (convenção do F6/META-005)."""
+    path_fn = _f6_doubts_function("doubts_file_path")
+    if path_fn is not None:
+        return path_fn(artifact_id, kind)
     folder = DOUBTS_DIR.get(kind, "duvidas-spec")
     return f"docs/implementation-artifacts/{folder}/{artifact_id}.md"
 
 
-def render_doubts_file(artifact_id: str, kind: str, status: str) -> str | None:
+def render_doubts_file(artifact_id: str, status: str) -> str | None:
     """Conteúdo do arquivo de dúvidas — **renderizado pelo F6** (formato canônico v1).
 
     Import tardio: sem o F6, **nenhum** arquivo é escrito — nunca um arquivo em
     formato errado (Contrato Comum §8.4 D2).
     """
-    try:
-        from app.services import doubts as doubts_service
-    except ImportError:
-        return None
-    render = getattr(doubts_service, "render_doubts_file", None)
+    render = _f6_doubts_function("render_doubts_file")
     if render is None:
         return None
     return render(artifact_id, [], status)
@@ -631,7 +631,7 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
     feature = frontmatter.get("feature") or PurePosixPath(path).stem
     version = str(frontmatter.get("version") or "1.0.0")
     doubts_index = doubts_index_path(kind, artifact_id)
-    doubts_content = render_doubts_file(artifact_id, kind, "draft")
+    doubts_content = render_doubts_file(artifact_id, "draft")
 
     inserted = await conn.fetchrow(
         """
