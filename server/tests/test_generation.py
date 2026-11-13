@@ -9,7 +9,9 @@ O banco é o de teste do F1 (`conftest.pool`), separado do banco de dev.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,7 +19,16 @@ import pytest
 
 from app.routers import generation
 from app.services import generator
-from app.auth import generate_token
+
+
+def _api_token() -> tuple[str, str]:
+    """Token opaco no formato do contrato §6: `sdd_<base64url(32)>` + sha256 hex.
+
+    Montado aqui (e não via `app.auth`) porque o `sys.modules` pode estar com
+    dublês de outra fase — o token é só o valor bruto e o sha256 do valor bruto.
+    """
+    raw = "sdd_" + secrets.token_urlsafe(32)
+    return raw, hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 # --------------------------------------------------------------------------- #
 # Fake do SDK anthropic (nenhuma chamada de rede)
@@ -253,7 +264,7 @@ async def demand(pool) -> dict[str, str]:
 @pytest.fixture
 async def limited_token(pool) -> str:
     """Token de API sem o escopo `demand:write`."""
-    raw, token_hash = generate_token()
+    raw, token_hash = _api_token()
     user_id = await pool.fetchval(
         "INSERT INTO users (github_id, login) VALUES ($1, $2) RETURNING id", 626262, "sem-escopo"
     )
@@ -703,6 +714,25 @@ async def test_demand_not_found_returns_404(pool) -> None:
     )
     assert status == 404
     assert payload["error"]["code"] == "not_found"
+
+
+async def test_path_conflict_returns_409(pool, demand) -> None:
+    """Mesmo path no mesmo repo → 409 (índice único `artifacts_repo_path_uniq` do F4)."""
+    await generation.handle_generate_br(pool, demand["id"], client=FakeClient(br_payload("login")))
+    other = await pool.fetchval(
+        "INSERT INTO demands (repo_id, module, title, body, status, created_by)"
+        " VALUES ($1,'login','Outra demanda','corpo','claimed',$2) RETURNING id",
+        demand["repo_id"],
+        demand["user_id"],
+    )
+    status, payload = await generation.handle_generate_br(
+        pool, str(other), client=FakeClient(br_payload("login"))
+    )
+    assert status == 409
+    assert payload["error"]["code"] == "artifact_path_conflict"
+    assert payload["error"]["detail"]["path"] == "docs/BR/login/login.md"
+    rows = await pool.fetch("SELECT id FROM artifacts WHERE kind = 'br'")
+    assert len(rows) == 1
 
 
 # --------------------------------------------------------------------------- #
