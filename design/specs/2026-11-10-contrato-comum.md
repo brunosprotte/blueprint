@@ -385,6 +385,33 @@ ainda não exista.
 | §6 | F6 depende de F2, F5 | F6 depende de F2, F4, F5 |
 | §7 | `skills/` na raiz do repo = fonte servida (F3) | mantém; o `skills/` do **plugin** (F8) é cópia instalada |
 
+### 8.3 `jsonb` chega como `str` — cada service normaliza (resolvido 2026-11-13)
+
+O `asyncpg` devolve `jsonb` como `str` quando o pool não tem codec registrado.
+**O F1 NÃO registra codec global** — o comportamento é uniforme em todas as fases:
+quem lê `jsonb` normaliza.
+
+Helper canônico (tolerante a `str`, `dict` e `list` — não quebra se um dia o pool
+trazer o valor já decodificado):
+
+```python
+def as_json(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return value
+    return value
+```
+
+Já usado em: `app/services/lifecycle.py` (F4), `app/services/retriever.py` e
+`app/services/indexer.py` (F7). Aplica-se a `events.payload`, `commits.files`,
+`artifacts.doubts_content` e `reviews.findings`.
+
+| Onde | Master diz | Corrige para |
+| --- | --- | --- |
+| F1 `db.py` | — | pool **sem** codec de `jsonb`; normalização é responsabilidade do service que lê |
+
 ## 9. Dependências e ondas de paralelismo
 
 ```
