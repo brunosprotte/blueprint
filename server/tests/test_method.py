@@ -2,33 +2,26 @@
 
 Os testes rodam contra a **fixture** `server/tests/fixtures/method/` — o `docs/` real
 do repo blueprint nunca é tocado.
+
+O banco é o do F1 (`server/tests/conftest.py`): a fixture `pool` aplica as
+migrations (inclusive a `001`, que cria `chunks.tsv` como coluna simples) e trunca
+as tabelas a cada teste. As fixtures `client` e `auth_token` também vêm do F1.
 """
 from __future__ import annotations
 
 import hashlib
-import os
 import shutil
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 
-os.environ.setdefault("SDD_SECRET_KEY", "test-secret-key")
-os.environ.setdefault("SDD_DATABASE_URL", "postgresql://sdd:sdd@localhost:5432/sdd")
-
-import asyncpg  # noqa: E402
-import httpx  # noqa: E402
-
-try:  # F1 (core do servidor) é pré-requisito — enquanto não existir, a fase inteira pula.
-    from app import db  # noqa: E402
-    from app.config import settings  # noqa: E402
-    from app.routers import method as method_router  # noqa: E402
-
-    F1_DISPONIVEL = True
-except Exception:  # pragma: no cover - F1 pendente
-    F1_DISPONIVEL = False
-
-pytestmark = pytest.mark.skipif(not F1_DISPONIVEL, reason="F1 pendente")
+from app.config import settings
+from app.routers import method as method_router
+from app.services.method import (
+    get_method_index,
+    load_method_document,
+    load_method_documents,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "method"
 
@@ -49,70 +42,10 @@ def repo_root(monkeypatch) -> Path:
     return FIXTURE_ROOT
 
 
-@pytest_asyncio.fixture
-async def method_pool():
-    """Pool no Postgres de teste. Pula se o banco (ou o schema do F1) não estiver de pé."""
-    try:
-        pool = await asyncpg.create_pool(settings.database_url)
-    except Exception as exc:  # pragma: no cover - ambiente sem banco
-        pytest.skip(f"Postgres indisponível: {exc}")
-    try:
-        if not await pool.fetchval("SELECT to_regclass('chunks')"):
-            pytest.skip("F1 pendente: schema não aplicado (tabela chunks ausente)")
-        yield pool
-    finally:
-        await pool.close()
-
-
 @pytest.fixture
-def patched_pool(method_pool, monkeypatch):
-    """Faz o servidor usar o pool de teste."""
-
-    async def _get_pool():
-        return method_pool
-
-    monkeypatch.setattr(db, "get_pool", _get_pool)
-    monkeypatch.setattr(db, "POOL", method_pool, raising=False)
-    return method_pool
-
-
-@pytest_asyncio.fixture
-async def client(patched_pool):
-    from app.main import app
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        yield http
-
-
-@pytest_asyncio.fixture
-async def auth_headers(method_pool) -> dict[str, str]:
-    """Token de API real no banco (só o sha256 é gravado — como manda o contrato)."""
-    raw = "sdd_" + hashlib.sha256(b"sdd-f3-test-token").hexdigest()[:43]
-    token_hash = hashlib.sha256(raw.encode()).hexdigest()
-    await method_pool.execute("DELETE FROM tokens WHERE token_hash = $1", token_hash)
-    user_id = await method_pool.fetchval(
-        "INSERT INTO users (github_id, login) VALUES ($1, $2) "
-        "ON CONFLICT (github_id) DO UPDATE SET login = EXCLUDED.login RETURNING id",
-        987654321,
-        "sdd-f3-test",
-    )
-    repo_id = await method_pool.fetchval(
-        "INSERT INTO repos (owner, name, default_branch) VALUES ($1, $2, $3) "
-        "ON CONFLICT (owner, name) DO UPDATE SET default_branch = EXCLUDED.default_branch "
-        "RETURNING id",
-        "sdd-f3",
-        "test",
-        "main",
-    )
-    await method_pool.execute(
-        "INSERT INTO tokens (user_id, repo_id, token_hash, scopes) VALUES ($1, $2, $3, $4)",
-        user_id,
-        repo_id,
-        token_hash,
-        ["demand:claim", "artifact:sync", "token:admin"],
-    )
-    return {"Authorization": f"Bearer {raw}"}
+def auth_headers(auth_token) -> dict[str, str]:
+    """Cabeçalho de autenticação com um token real gravado no banco."""
+    return {"Authorization": f"Bearer {auth_token}"}
 
 
 # --------------------------------------------------------------------------- #
@@ -235,8 +168,8 @@ async def test_search_response_shape(client, repo_root):
         assert set(hit) == HIT_KEYS
 
 
-async def test_search_hits_are_method_corpus(client, repo_root, method_pool):
-    await method_pool.execute(
+async def test_search_hits_are_method_corpus(client, repo_root, pool):
+    await pool.execute(
         "INSERT INTO chunks (source_kind, heading, text, token_count, corpus_id) "
         "VALUES ('br', 'Workspace de outro repo', 'workspace convention', 3, $1)",
         "repo:00000000-0000-0000-0000-000000000000",
@@ -250,7 +183,7 @@ async def test_search_hits_are_method_corpus(client, repo_root, method_pool):
             assert hit["artifact_id"] is None
             assert hit["demand_id"] is None
     finally:
-        await method_pool.execute("DELETE FROM chunks WHERE corpus_id <> 'method'")
+        await pool.execute("DELETE FROM chunks WHERE corpus_id <> 'method'")
 
 
 async def test_search_empty_query_400(client, repo_root):
@@ -281,6 +214,39 @@ async def test_deterministic_search(client, repo_root):
     first = (await client.get("/api/method/search", params={"q": "workspace convention"})).json()
     second = (await client.get("/api/method/search", params={"q": "workspace convention"})).json()
     assert first == second
+
+
+async def test_search_matches_knowledge_shape(client, repo_root):
+    """A forma do hit é a mesma do F7 (`GET /api/knowledge`) — Contrato Comum §7.6."""
+    body = (await client.get("/api/method/search", params={"q": "workspace convention"})).json()
+    assert set(body) == {"query", "hits"}
+    for hit in body["hits"]:
+        assert set(hit) == HIT_KEYS
+        assert isinstance(hit["score"], float)
+
+
+# --------------------------------------------------------------------------- #
+# Handoff para o F5 — `app/services/method.py`
+# --------------------------------------------------------------------------- #
+
+
+async def test_method_index_api(repo_root):
+    """`MethodIndex` expõe `.all()` / `.get()` — o que o resto do sistema consome."""
+    index = get_method_index(FIXTURE_ROOT)[0]
+    assert [doc.path for doc in index.all()] == sorted(doc.path for doc in index.all())
+    assert index.get("META-004").id == "META-004"
+    assert index.get("nao-existe") is None
+
+
+async def test_load_method_documents_handoff(repo_root):
+    """`load_method_documents` é o caminho primário do F5 (async, sem banco)."""
+    docs = await load_method_documents()
+    assert docs, "esperava o corpus do método"
+    assert all(doc.content for doc in docs)
+    only_meta = await load_method_documents("META")
+    assert only_meta and all(doc.category == "META" for doc in only_meta)
+    assert await load_method_document("META-004") is not None
+    assert await load_method_document("nao-existe") is None
 
 
 # --------------------------------------------------------------------------- #

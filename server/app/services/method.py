@@ -32,8 +32,14 @@ __all__ = [
     "MethodIndex",
     "Chunk",
     "chunk_document",
+    "get_method_index",
     "index_chunks",
+    "load_method_document",
+    "load_method_documents",
+    "reset_method_index",
     "search",
+    "sha256_hex",
+    "split_frontmatter",
     "tokenize",
 ]
 
@@ -382,6 +388,65 @@ class MethodIndex:
         if match:
             return match.group(1)
         return _slug(path)
+
+
+# --------------------------------------------------------------------------- #
+# Índice compartilhado e handoff para o F5
+# --------------------------------------------------------------------------- #
+
+_index_cache: MethodIndex | None = None
+
+
+def _default_root() -> Path:
+    """Raiz do repo blueprint — `SDD_REPO_ROOT` (ou a raiz do repo, sem `app.config`)."""
+    try:
+        from app.config import settings
+
+        return Path(settings.repo_root)
+    except Exception:  # pragma: no cover - app.config ausente (F1 pendente)
+        return Path(__file__).resolve().parents[3]
+
+
+def get_method_index(root: Path | None = None) -> tuple[MethodIndex, bool]:
+    """Índice do método compartilhado — `(índice, corpus mudou desde a última checagem)`.
+
+    O cache vive aqui (e não no router) para que o F5 e a API leiam **a mesma**
+    instância. `changed=True` numa raiz nova: o corpus precisa ser reindexado.
+    """
+    global _index_cache
+    target = Path(root) if root is not None else _default_root()
+    index = _index_cache
+    if index is None or index.root != target:
+        index = MethodIndex(target)
+        _index_cache = index
+        return index, True
+    return index, index.refresh()
+
+
+def reset_method_index() -> None:
+    """Limpa o índice compartilhado — troca de raiz e testes."""
+    global _index_cache
+    _index_cache = None
+
+
+async def load_method_documents(category: str | None = None) -> list[MethodDoc]:
+    """Corpus do método em memória — handoff do F5 (spec F5, "Origem do corpus").
+
+    Sem banco: é leitura do disco (invariante 4). `category` filtra pela
+    categoria (`"META"`, `"SK"`, ...); sem filtro, devolve tudo.
+    """
+    index, _ = get_method_index()
+    docs = index.all()
+    if category:
+        wanted = category.strip().upper()
+        docs = [doc for doc in docs if doc.category == wanted]
+    return docs
+
+
+async def load_method_document(doc_id: str) -> MethodDoc | None:
+    """Um documento do corpus pelo id — handoff do F5."""
+    index, _ = get_method_index()
+    return index.get(doc_id)
 
 
 # --------------------------------------------------------------------------- #
