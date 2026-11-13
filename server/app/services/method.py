@@ -455,7 +455,11 @@ async def load_method_document(doc_id: str) -> MethodDoc | None:
 
 
 def chunk_document(doc: MethodDoc) -> list[Chunk]:
-    """Divide o documento por seção H2. Sem H2 → um chunk (heading = H1)."""
+    """Divide o documento por seção H2. Sem H2 → um chunk (heading = H1).
+
+    Algoritmo de corte da spec F3 §4.3. A **escrita** do corpus é do F7
+    (`indexer.index_method`) — aqui é só o corte de referência.
+    """
     _, body = split_frontmatter(doc.content)
     parts = _H2.split(body)
     raw: list[tuple[str, str]] = []
@@ -484,26 +488,21 @@ def chunk_document(doc: MethodDoc) -> list[Chunk]:
 
 
 async def index_chunks(pool, docs: list[MethodDoc]) -> int:
-    """Reindexa o corpus do método. `DELETE` + reinserção — o corpus é derivado.
+    """Indexa o corpus `method` — **delega ao F7**, que é o dono da escrita.
 
-    `chunks.tsv` é coluna simples (Contrato Comum §4.1): F3 escreve o valor no
-    `INSERT` com a **mesma** expressão que o trigger do F7 usará.
+    O F7 (`app/services/indexer.py::index_method`) escreve em `chunks`: hash do
+    corpus, `chunk_markdown`, `source_ref` (chave de idempotência) e o evento
+    `method_corpus_indexed` (Contrato Comum §7.6). O F3 **serve** o método — não
+    apaga nem reinsere o corpus, e não mantém um corpus paralelo.
+
+    `pool` e `docs` ficam na assinatura por compatibilidade com quem chama (o
+    router da F3): o F7 usa o pool global do F1 e lê `docs/` do disco.
     """
-    rows: list[tuple[str, str, str, int]] = []
-    for doc in docs:
-        for chunk in chunk_document(doc):
-            rows.append(("method", chunk.heading, chunk.text, chunk.token_count))
-    async with pool.acquire() as connection:
-        await connection.execute("DELETE FROM chunks WHERE corpus_id = 'method'")
-        if rows:
-            await connection.executemany(
-                "INSERT INTO chunks (source_kind, heading, text, token_count, tsv, corpus_id) "
-                "VALUES ($1, $2, $3, $4, "
-                "        to_tsvector('portuguese', coalesce($2, '') || ' ' || coalesce($3, '')), "
-                "        'method')",
-                rows,
-            )
-    return len(rows)
+    try:
+        from app.services.indexer import index_method  # F7 — dono da escrita
+    except ImportError as exc:  # pragma: no cover - F7 pendente
+        raise RuntimeError(f"F7 indisponível: corpus do método não indexado ({exc})") from exc
+    return await index_method()
 
 
 async def search(pool, query: str, top: int = 50) -> list[dict]:

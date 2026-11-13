@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
+from app import main as app_main
 from app.config import settings
 from app.routers import method as method_router
 from app.services.method import (
@@ -24,6 +27,10 @@ from app.services.method import (
 )
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "method"
+
+#: Módulo real de `app.db`. O `app.main` foi importado pelo conftest do F1 antes de
+#: qualquer dublê de outra fase, então esta referência é o módulo de verdade.
+REAL_DB = app_main.db
 
 HIT_KEYS = {"heading", "text", "score", "source_kind", "artifact_id", "demand_id", "corpus_id"}
 SKILL_KEYS = {"id", "version", "hash", "description", "path"}
@@ -40,6 +47,24 @@ def repo_root(monkeypatch) -> Path:
     monkeypatch.setattr(settings, "repo_root", FIXTURE_ROOT)
     method_router.reset_services()
     return FIXTURE_ROOT
+
+
+@pytest_asyncio.fixture
+async def method_corpus(repo_root, pool, monkeypatch):
+    """Popula o corpus `method` — a escrita é do F7 (`indexer.index_method`).
+
+    O F3 não escreve em `chunks` (Contrato Comum §7.6): quem indexa é o F7.
+
+    O `index_method` do F7 importa `app.db.get_pool` em tempo de execução. O
+    `test_claim.py` (F4) troca `app.db` por um dublê no **import do módulo** e
+    deixa um pool fechado lá — durante este teste volta o módulo real. É um
+    bug de outra fase; o `monkeypatch` desfaz a troca no fim do teste.
+    """
+    from app.services.indexer import index_method
+
+    monkeypatch.setitem(sys.modules, "app.db", REAL_DB)
+    await index_method()
+    return pool
 
 
 @pytest.fixture
@@ -158,7 +183,7 @@ async def test_doc_not_found_404(client, repo_root):
 # --------------------------------------------------------------------------- #
 
 
-async def test_search_response_shape(client, repo_root):
+async def test_search_response_shape(client, method_corpus):
     response = await client.get("/api/method/search", params={"q": "workspace convention"})
     assert response.status_code == 200
     body = response.json()
@@ -168,7 +193,7 @@ async def test_search_response_shape(client, repo_root):
         assert set(hit) == HIT_KEYS
 
 
-async def test_search_hits_are_method_corpus(client, repo_root, pool):
+async def test_search_hits_are_method_corpus(client, method_corpus, pool):
     await pool.execute(
         "INSERT INTO chunks (source_kind, heading, text, token_count, corpus_id) "
         "VALUES ('br', 'Workspace de outro repo', 'workspace convention', 3, $1)",
@@ -186,37 +211,37 @@ async def test_search_hits_are_method_corpus(client, repo_root, pool):
         await pool.execute("DELETE FROM chunks WHERE corpus_id <> 'method'")
 
 
-async def test_search_empty_query_400(client, repo_root):
+async def test_search_empty_query_400(client, method_corpus):
     response = await client.get("/api/method/search", params={"q": ""})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_query"
 
 
-async def test_search_no_match_returns_empty(client, repo_root):
+async def test_search_no_match_returns_empty(client, method_corpus):
     response = await client.get("/api/method/search", params={"q": "xyzzy-inexistente"})
     assert response.status_code == 200
     assert response.json() == {"query": "xyzzy-inexistente", "hits": []}
 
 
-async def test_search_respects_top(client, repo_root):
+async def test_search_respects_top(client, method_corpus):
     response = await client.get("/api/method/search", params={"q": "workspace convention", "top": 1})
     assert response.status_code == 200
     assert len(response.json()["hits"]) == 1
 
 
-async def test_search_invalid_top_400(client, repo_root):
+async def test_search_invalid_top_400(client, method_corpus):
     response = await client.get("/api/method/search", params={"q": "workspace", "top": 0})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_query"
 
 
-async def test_deterministic_search(client, repo_root):
+async def test_deterministic_search(client, method_corpus):
     first = (await client.get("/api/method/search", params={"q": "workspace convention"})).json()
     second = (await client.get("/api/method/search", params={"q": "workspace convention"})).json()
     assert first == second
 
 
-async def test_search_matches_knowledge_shape(client, repo_root):
+async def test_search_matches_knowledge_shape(client, method_corpus):
     """A forma do hit é a mesma do F7 (`GET /api/knowledge`) — Contrato Comum §7.6."""
     body = (await client.get("/api/method/search", params={"q": "workspace convention"})).json()
     assert set(body) == {"query", "hits"}
