@@ -30,6 +30,7 @@ class SyncDoc(BaseModel):
 class SyncBody(BaseModel):
     repo: str
     docs: list[SyncDoc] = []
+    repo_path: str | None = None
 
 
 @router.get("/artifacts")
@@ -96,6 +97,7 @@ async def sync(
         repo=body.repo,
         docs=[doc.model_dump() for doc in body.docs],
         actor_id=user.id,
+        repo_path=body.repo_path,
     )
 
 

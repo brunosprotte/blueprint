@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -26,7 +25,7 @@ from app.services.lifecycle import (
 
 ID_PATTERN = re.compile(r"^(BR|SPEC)-\d{3}$")
 KINDS = {"br": "BR", "spec": "SPEC", "ri": "RI"}
-DOUBTS_DIR = {"br": "duvidas-br", "spec": "duvidas-spec", "ri": "duvidas-ri"}
+DOUBTS_DIR = {"br": "duvidas-br", "spec": "duvidas-spec"}
 ARTIFACT_LIST_COLUMNS = (
     "a.id, a.demand_id, a.repo_id, a.kind, a.module, a.feature, a.path, a.sha, "
     "a.status, a.version, a.doubts_index, a.created_at, a.updated_at"
@@ -235,10 +234,6 @@ def sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 async def _next_artifact_id(conn, kind: str) -> str:
     prefix = KINDS[kind]
     await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"artifact-id:{prefix}")
@@ -254,28 +249,33 @@ async def _next_artifact_id(conn, kind: str) -> str:
 
 
 def doubts_index_path(kind: str, artifact_id: str) -> str:
-    return f"docs/implementation-artifacts/{DOUBTS_DIR[kind]}/{artifact_id}.md"
+    """Caminho do arquivo de dúvidas do artefato (convenção do F6/META-005)."""
+    try:
+        from app.services import doubts as doubts_service
+
+        path_fn = getattr(doubts_service, "doubts_file_path", None)
+        if path_fn is not None:
+            return path_fn(artifact_id, kind)
+    except ImportError:
+        pass
+    folder = DOUBTS_DIR.get(kind, "duvidas-spec")
+    return f"docs/implementation-artifacts/{folder}/{artifact_id}.md"
 
 
-def render_doubts_template(kind: str, artifact_id: str, timestamp: str) -> str:
-    """Template inicial do arquivo de dúvidas (META-006 §5)."""
-    return f"""---
-type: Dúvidas
-artifact: {artifact_id}
-artifactStatus: draft
-updatedAt: {timestamp}
----
+def render_doubts_file(artifact_id: str, kind: str, status: str) -> str | None:
+    """Conteúdo do arquivo de dúvidas — **renderizado pelo F6** (formato canônico v1).
 
-# Dúvidas — {artifact_id}
-
-## Estado
-
-Nenhuma pendência registrada.
-
-## Histórico
-
-- {timestamp} — arquivo inicializado.
-"""
+    Import tardio: sem o F6, **nenhum** arquivo é escrito — nunca um arquivo em
+    formato errado (Contrato Comum §8.4 D2).
+    """
+    try:
+        from app.services import doubts as doubts_service
+    except ImportError:
+        return None
+    render = getattr(doubts_service, "render_doubts_file", None)
+    if render is None:
+        return None
+    return render(artifact_id, [], status)
 
 
 # --------------------------------------------------------------------------
@@ -291,23 +291,68 @@ def _repo_root() -> Path:
         return Path(__file__).resolve().parents[3]
 
 
-def build_universe(pool):
-    """Universo de links: corpus do método (F2) + artefatos sincronizados."""
+async def build_universe(pool, repo_path: str | Path | None = None):
+    """Universo de links do linter.
+
+    `repo_path` é a raiz do **repo do dev** (o repo sincronizado): o
+    `MethodCorpus` varre `<repo>/docs` e indexa o sidecar de dúvidas com o path
+    relativo `docs/implementation-artifacts/...` — exatamente o formato que o
+    PATH-002 resolve (Contrato Comum §8.4 D1). `MethodCorpus(repo_path / "docs")`
+    produziria corpus vazio (`docs/docs`).
+
+    O corpus do método (repo blueprint) entra junto: é ele que resolve as
+    referências META/PAT/TP dos artefatos. Sem `repo_path`, o universo é só esse
+    — e o sidecar do lote resolve pelo universo do próprio lote (`lint_batch`).
+    """
     try:
         from app.lint.runner import CompositeUniverse, MethodCorpus, SyncedArtifacts
     except ImportError:
         return None
     try:
-        return CompositeUniverse(
-            MethodCorpus(_repo_root() / "docs"),
-            SyncedArtifacts(pool),
-        )
+        synced = SyncedArtifacts(pool)
+        await synced.refresh()
+        parts = []
+        if repo_path:
+            parts.append(MethodCorpus(Path(repo_path)))
+        parts.append(MethodCorpus(_repo_root()))
+        parts.append(synced)
+        return CompositeUniverse(*parts)
     except Exception:
         return None
 
 
+def _lint_batch(items: list[dict], universe) -> dict[str, list]:
+    """Findings por path — o linter roda em **LOTE**, nunca documento a documento.
+
+    As regras cruzadas do F2 (BR-004: toda AC da BR coberta por alguma SPEC)
+    só fazem sentido com as SPECs do mesmo lote (Contrato Comum §8.4 D6).
+    Documento isolado, sem SPEC no lote → BR-004 não é aplicável.
+    """
+    if universe is None:
+        return {}
+    try:
+        from app.lint.runner import lint_batch, parse_document
+    except ImportError:
+        return {}
+    docs = [
+        parse_document(item["path"], item["content"], repo_id=item.get("repo_id"))
+        for item in items
+        if item["kind"] in ("br", "spec")
+    ]
+    if not docs:
+        return {}
+    try:
+        findings = lint_batch(docs, universe)
+    except Exception:
+        return {}
+    grouped: dict[str, list] = {}
+    for finding in findings:
+        grouped.setdefault(finding.path or "", []).append(finding)
+    return grouped
+
+
 def _lint_doc(path, content, frontmatter, body, kind, repo_id, universe):
-    """Roda o linter do F2. `None` = linter indisponível (não promote)."""
+    """Roda o linter do F2 num documento. `None` = linter indisponível."""
     if universe is None:
         return None
     try:
@@ -341,9 +386,10 @@ def _finding_dict(finding) -> dict:
     }
 
 
-def _lint_counts(findings) -> dict:
-    if findings is None:
+def _lint_counts(findings, available: bool = True) -> dict:
+    if not available:
         return {"error": 0, "warning": 0, "available": False}
+    findings = findings or []
     errors = sum(1 for f in findings if getattr(f, "severity", None) == "error")
     warnings = sum(1 for f in findings if getattr(f, "severity", None) == "warning")
     return {"error": errors, "warning": warnings, "available": True}
@@ -352,8 +398,19 @@ def _lint_counts(findings) -> dict:
 # --------------------------------------------------------------------------
 # Sync
 # --------------------------------------------------------------------------
-async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> dict:
-    """Upsert por `(repo_id, path)`. Uma transação só; divergência aborta tudo."""
+async def sync(
+    pool,
+    *,
+    repo: str,
+    docs: list[dict],
+    actor_id: str | None,
+    repo_path: str | None = None,
+) -> dict:
+    """Upsert por `(repo_id, path)`. Uma transação só; divergência aborta tudo.
+
+    `repo_path` = raiz do repo do dev no disco (opcional): é o corpus sobre o
+    qual o linter resolve os links do repo sincronizado (Contrato Comum §8.4 D1).
+    """
     results: list[dict] = []
     summary = {
         "docs": len(docs),
@@ -366,22 +423,42 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
         "lint_warning": 0,
     }
 
+    items: list[dict] = []
+    for doc in docs:
+        path = validate_path(doc.get("path") or "")
+        content = doc.get("content") or ""
+        kind = classify_path(path)
+        if kind is None:
+            # O sidecar de dúvidas (`docs/implementation-artifacts/**`) nunca vira
+            # linha de `artifacts` (Contrato Comum §8.4 D1).
+            summary["ignored"] += 1
+            continue
+        frontmatter, body = parse_frontmatter(content)
+        items.append(
+            {
+                "path": path,
+                "content": content,
+                "sha": sha256(content),
+                "kind": kind,
+                "frontmatter": frontmatter,
+                "body": body,
+            }
+        )
+
+    universe = await build_universe(pool, repo_path)
+    findings_by_path = _lint_batch(items, universe)
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             repo_id = await _ensure_repo_conn(conn, repo)
-            universe = build_universe(pool)
 
-            for doc in docs:
-                path = validate_path(doc.get("path") or "")
-                content = doc.get("content") or ""
-                sha = sha256(content)
-                kind = classify_path(path)
+            for item in items:
+                path = item["path"]
+                content = item["content"]
+                sha = item["sha"]
+                kind = item["kind"]
+                frontmatter = item["frontmatter"]
 
-                if kind is None:
-                    summary["ignored"] += 1
-                    continue
-
-                frontmatter, body = parse_frontmatter(content)
                 row, created = await _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
 
                 artifact_id = row["id"]
@@ -389,8 +466,9 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                 promoted = False
                 changed = created
 
-                findings = _lint_doc(path, content, frontmatter, body, kind, str(repo_id), universe)
-                lint_result = _lint_counts(findings)
+                lint_result = _lint_counts(
+                    findings_by_path.get(path, []), available=universe is not None
+                )
 
                 if not created:
                     if status == "draft":
@@ -431,7 +509,7 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                         )
                         changed = True
 
-                await _sync_edges(conn, artifact_id, frontmatter)
+                await _sync_edges(conn, artifact_id, kind, frontmatter)
 
                 summary["artifacts"] += 1
                 summary["created"] += int(created)
@@ -510,12 +588,11 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
     if artifact_id is None:
         artifact_id = await _next_artifact_id(conn, kind)
 
-    timestamp = _now_iso()
     module = frontmatter.get("module") or PurePosixPath(path).parent.name
     feature = frontmatter.get("feature") or PurePosixPath(path).stem
     version = str(frontmatter.get("version") or "1.0.0")
     doubts_index = doubts_index_path(kind, artifact_id)
-    doubts_content = render_doubts_template(kind, artifact_id, timestamp)
+    doubts_content = render_doubts_file(artifact_id, kind, "draft")
 
     inserted = await conn.fetchrow(
         """
@@ -563,20 +640,39 @@ def _id_from_frontmatter(frontmatter: dict) -> str | None:
     return None
 
 
-async def _sync_edges(conn, artifact_id: str, frontmatter: dict) -> None:
-    """Arestas do grafo a partir do frontmatter (spec §5.8)."""
-    edges: list[tuple[str, str]] = []
+async def _sync_edges(conn, artifact_id: str, kind: str, frontmatter: dict) -> None:
+    """Arestas do grafo a partir do frontmatter.
+
+    Direção canônica (Contrato Comum §8.4 D4):
+
+    | tipo | parent | child |
+    | --- | --- | --- |
+    | `derives_from` | a SPEC | a BR de origem |
+    | `depends_on` | o dependente | a dependência |
+    | `tests` | a SPEC | o RI que a testa |
+
+    A aresta `tests` nasce do arquivo **RI** (o frontmatter do RI lista as SPECs
+    que ele testa — §8.4 D3); no RI, `parent` é a SPEC citada e `child` é o RI.
+    """
+    edges: list[tuple[str, str, str]] = []
+
     created_from = frontmatter.get("createdFrom")
     if isinstance(created_from, str) and created_from:
-        edges.append((created_from, "derives_from"))
-    for child in frontmatter.get("dependsOn") or []:
-        if isinstance(child, str) and child:
-            edges.append((child, "depends_on"))
-    for child in frontmatter.get("tests") or []:
-        if isinstance(child, str) and child:
-            edges.append((child, "tests"))
+        edges.append((artifact_id, created_from, "derives_from"))
 
-    for child_id, edge_type in edges:
+    for dependency in frontmatter.get("dependsOn") or []:
+        if isinstance(dependency, str) and dependency:
+            edges.append((artifact_id, dependency, "depends_on"))
+
+    for other in frontmatter.get("tests") or []:
+        if not isinstance(other, str) or not other:
+            continue
+        if kind == "ri":
+            edges.append((other, artifact_id, "tests"))
+        else:
+            edges.append((artifact_id, other, "tests"))
+
+    for parent_id, child_id, edge_type in edges:
         exists = await conn.fetchval("SELECT 1 FROM artifacts WHERE id = $1", child_id)
         if not exists:
             continue
@@ -586,7 +682,7 @@ async def _sync_edges(conn, artifact_id: str, frontmatter: dict) -> None:
             VALUES ($1, $2, $3)
             ON CONFLICT (parent_id, child_id, type) DO NOTHING
             """,
-            artifact_id,
+            parent_id,
             child_id,
             edge_type,
         )
@@ -597,7 +693,7 @@ async def _sync_edges(conn, artifact_id: str, frontmatter: dict) -> None:
 # --------------------------------------------------------------------------
 async def _lint_for_artifact(pool, artifact: dict):
     """Lint estrutural do artefato — `None` se o linter (F2) não existir."""
-    universe = build_universe(pool)
+    universe = await build_universe(pool)
     if universe is None:
         return None
     frontmatter, body = parse_frontmatter(artifact.get("content") or "")
