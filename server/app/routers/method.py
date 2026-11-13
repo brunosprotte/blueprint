@@ -16,7 +16,6 @@ implementação não são publicadas.
 """
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -26,7 +25,13 @@ from fastapi.responses import JSONResponse
 from app import db
 from app.auth import require_user
 from app.config import settings
-from app.services.method import MethodIndex, index_chunks, search
+from app.services.method import (
+    MethodIndex,
+    get_method_index,
+    index_chunks,
+    reset_method_index,
+    search,
+)
 from app.services.skills import SkillRegistry
 
 __all__ = ["router", "get_method_service", "get_skill_registry", "reset_services"]
@@ -36,8 +41,6 @@ router = APIRouter()
 DEFAULT_TOP = 50
 MAX_TOP = 200
 
-_lock = asyncio.Lock()
-_method_index: MethodIndex | None = None
 _skill_registry: SkillRegistry | None = None
 
 
@@ -48,37 +51,29 @@ _skill_registry: SkillRegistry | None = None
 
 async def get_method_service() -> MethodIndex:
     """Índice do método, com carga preguiçosa e reindexação quando o hash muda."""
-    global _method_index
-    root = Path(settings.repo_root)
-    index = _method_index
-    if index is None or index.root != root:
-        async with _lock:
-            index = _method_index
-            if index is None or index.root != root:
-                index = MethodIndex(root)
-                _method_index = index
-                await _sync_chunks(index)
-                return index
-    if index.refresh():
+    index, changed = get_method_index(Path(settings.repo_root))
+    if changed:
         await _sync_chunks(index)
     return index
 
 
 def get_skill_registry() -> SkillRegistry:
-    """Registro de skills, com carga preguiçosa."""
+    """Registro de skills, com carga preguiçosa e releitura do disco a cada pedido."""
     global _skill_registry
     root = Path(settings.repo_root)
     registry = _skill_registry
     if registry is None or registry.root != root:
         registry = SkillRegistry(root)
         _skill_registry = registry
+    else:
+        registry.refresh()
     return registry
 
 
 def reset_services() -> None:
     """Limpa o cache dos serviços (usado por testes)."""
-    global _method_index, _skill_registry
-    _method_index = None
+    global _skill_registry
+    reset_method_index()
     _skill_registry = None
 
 
