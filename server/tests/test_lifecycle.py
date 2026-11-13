@@ -1,41 +1,17 @@
 """Ciclo de vida — máquina de estados e transições de demanda (spec §7).
 
-A primeira parte é lógica pura (roda sem banco). A segunda exercita as
-transições contra o Postgres real, reaproveitando o harness de
-`test_claim.py` (doubles do core do F1 + schema de teste próprio).
+A primeira parte é lógica pura (sem banco). A segunda exercita as transições
+pelas rotas reais, com as fixtures do F1 (`pool`, `client`, `auth_token`).
 """
 
 from __future__ import annotations
 
-import importlib.util
-import sys
+import json
 import uuid
-from pathlib import Path
 
 import pytest
 
-SERVER_ROOT = Path(__file__).resolve().parents[1]
-if str(SERVER_ROOT) not in sys.path:
-    sys.path.insert(0, str(SERVER_ROOT))
-
-
-def _load_sibling(name: str):
-    """Carrega o módulo irmão pelo caminho — independe de `__init__.py`."""
-    path = Path(__file__).with_name(name)
-    spec = importlib.util.spec_from_file_location(f"f4_{path.stem}", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-harness = _load_sibling("test_claim.py")
-
-pool = harness.pool
-new_user = harness.new_user
-new_repo = harness.new_repo
-
-from app.services.lifecycle import (  # noqa: E402
+from app.services.lifecycle import (
     ARTIFACT_STATUSES,
     ARTIFACT_TRANSITIONS,
     DEMAND_STATUSES,
@@ -47,6 +23,49 @@ from app.services.lifecycle import (  # noqa: E402
     error_payload,
     error_response,
 )
+
+
+def _auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _payload(value) -> dict:
+    return json.loads(value) if isinstance(value, str) else value
+
+
+async def _user_id(pool) -> str:
+    row = await pool.fetchrow("SELECT id FROM users WHERE login = 'tester'")
+    return str(row["id"])
+
+
+async def _new_demand(pool, repo_id: str, created_by: str, title: str = "demanda") -> str:
+    row = await pool.fetchrow(
+        """
+        INSERT INTO demands (repo_id, module, title, body, status, created_by)
+        VALUES ($1, 'login', $2, 'corpo', 'open', $3)
+        RETURNING id
+        """,
+        uuid.UUID(repo_id),
+        title,
+        uuid.UUID(created_by),
+    )
+    return str(row["id"])
+
+
+async def _create_demand(client, auth_token, title: str = "demanda") -> str:
+    """Cria uma demanda `open` pela API e devolve o id."""
+    response = await client.post(
+        "/api/demands",
+        json={
+            "repo": "acme/app",
+            "module": "login",
+            "title": title,
+            "body": "preciso de login",
+        },
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 200
+    return response.json()["id"]
 
 
 # --------------------------------------------------------------------------
@@ -127,58 +146,214 @@ def test_error_response_status():
 
 
 # --------------------------------------------------------------------------
-# Transições — contra o Postgres
+# Criação de demanda — rotas reais
 # --------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_illegal_transition_via_api(pool):
-    """`merge` em demanda `open` → 409 `illegal_transition`."""
-    from app.routers import demands as demands_router
-
-    user_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, user_id)
-
-    response = await demands_router.merge_demand(
-        demand_id=demand_id,
-        user=sys.modules["app.auth"].User(id=user_id),
+async def test_create_demand_open_and_event(client, auth_token, pool):
+    """`POST /api/demands` cria a demanda `open` e grava `demand.created`."""
+    response = await client.post(
+        "/api/demands",
+        json={
+            "repo": "acme/app",
+            "module": "login",
+            "title": "login",
+            "body": "preciso de login",
+        },
+        headers=_auth(auth_token),
     )
 
-    assert response.status_code == 409
-    assert b'"illegal_transition"' in response.body
-    assert b'"open -&gt; merged"' in response.body or b'"open -> merged"' in response.body
+    assert response.status_code == 200
+    demand = response.json()
+    assert demand["status"] == "open"
+    assert demand["repo"] == "acme/app"
+    assert demand["claimed_by"] is None
+
+    event = await pool.fetchrow(
+        "SELECT * FROM events WHERE demand_id = $1 AND type = 'demand.created'",
+        uuid.UUID(demand["id"]),
+    )
+    assert event is not None
 
 
 @pytest.mark.asyncio
-async def test_block_requires_reason(pool):
-    """Motivo vazio → 400 `reason_required`."""
-    from app.routers import demands as demands_router
-
-    user_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, user_id)
-
-    response = await demands_router.block_demand(
-        demand_id=demand_id,
-        body=demands_router.BlockDemandBody(reason="   "),
-        user=sys.modules["app.auth"].User(id=user_id),
+async def test_create_demand_empty_body_400(client, auth_token):
+    """Body vazio → 400 `empty_body`."""
+    response = await client.post(
+        "/api/demands",
+        json={"repo": "acme/app", "module": "login", "title": "login", "body": "   "},
+        headers=_auth(auth_token),
     )
 
     assert response.status_code == 400
-    assert b'"reason_required"' in response.body
+    assert response.json()["error"]["code"] == "empty_body"
 
 
 @pytest.mark.asyncio
-async def test_block_reason_in_event(pool):
-    """O motivo vai no `payload` do evento `demand.blocked` (spec §4.1)."""
-    from app.services import demands as demands_service
-
-    user_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, user_id)
-
-    await demands_service.block_demand(
-        pool, demand_id=demand_id, reason="dependência externa", actor_id=user_id
+async def test_get_demand_carries_artifacts_and_events(client, auth_token, pool):
+    """`GET /api/demands/{id}` devolve a demanda + artefatos + eventos."""
+    user_id = await _user_id(pool)
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
     )
+    demand_id = await _new_demand(pool, str(repo_id), user_id)
+    await pool.execute(
+        """
+        INSERT INTO artifacts (id, demand_id, repo_id, kind, path, status)
+        VALUES ('BR-009', $1, $2, 'br', 'docs/BR/login/login.md', 'draft')
+        """,
+        uuid.UUID(demand_id),
+        repo_id,
+    )
+
+    response = await client.get(f"/api/demands/{demand_id}", headers=_auth(auth_token))
+
+    assert response.status_code == 200
+    demand = response.json()
+    assert demand["id"] == demand_id
+    assert [artifact["id"] for artifact in demand["artifacts"]] == ["BR-009"]
+    assert isinstance(demand["events"], list)
+
+
+@pytest.mark.asyncio
+async def test_get_demand_not_found_404(client, auth_token):
+    response = await client.get(
+        f"/api/demands/{uuid.uuid4()}", headers=_auth(auth_token)
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+
+
+# --------------------------------------------------------------------------
+# Transições
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_start_demand_by_owner(client, auth_token, pool):
+    """`claimed → in_progress` pelo dono do claim."""
+    await _create_demand(client, auth_token)
+
+    claim = await client.post(
+        "/api/claims", json={"repo": "acme/app"}, headers=_auth(auth_token)
+    )
+    assert claim.status_code == 200
+    demand_id = claim.json()["demand"]["id"]
+
+    response = await client.post(
+        f"/api/demands/{demand_id}/start", headers=_auth(auth_token)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_start_demand_by_non_owner_403(client, auth_token, pool):
+    """`start` por quem não é o dono do claim → 403 `not_claim_owner`."""
+    from app.services import claims as claims_service
+
+    owner_id = str(
+        await pool.fetchval(
+            "INSERT INTO users (github_id, login) VALUES ($1, 'dono') RETURNING id",
+            uuid.uuid4().int % 10**12,
+        )
+    )
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
+    )
+    demand_id = await _new_demand(pool, str(repo_id), owner_id)
+    await claims_service.claim_next(pool, repo="acme/app", user_id=owner_id)
+
+    response = await client.post(
+        f"/api/demands/{demand_id}/start", headers=_auth(auth_token)
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "not_claim_owner"
+
+    row = await pool.fetchrow("SELECT status FROM demands WHERE id = $1", uuid.UUID(demand_id))
+    assert row["status"] == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_release_by_non_owner_403(client, auth_token, pool):
+    """Só o dono do claim libera a demanda."""
+    from app.services import claims as claims_service
+
+    owner_id = str(
+        await pool.fetchval(
+            "INSERT INTO users (github_id, login) VALUES ($1, 'dono') RETURNING id",
+            uuid.uuid4().int % 10**12,
+        )
+    )
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
+    )
+    demand_id = await _new_demand(pool, str(repo_id), owner_id)
+    await claims_service.claim_next(pool, repo="acme/app", user_id=owner_id)
+
+    response = await client.post(
+        f"/api/demands/{demand_id}/release", headers=_auth(auth_token)
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "not_claim_owner"
+
+
+@pytest.mark.asyncio
+async def test_release_by_owner_returns_to_open(client, auth_token, pool):
+    """`release` devolve a demanda para `open` e zera o ownership."""
+    await _create_demand(client, auth_token)
+
+    claim = await client.post(
+        "/api/claims", json={"repo": "acme/app"}, headers=_auth(auth_token)
+    )
+    demand_id = claim.json()["demand"]["id"]
+
+    response = await client.post(
+        f"/api/demands/{demand_id}/release", headers=_auth(auth_token)
+    )
+
+    assert response.status_code == 200
+    released = response.json()
+    assert released["status"] == "open"
+    assert released["claimed_by"] is None
+    assert released["claimed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_block_requires_reason(client, auth_token, pool):
+    """Motivo vazio → 400 `reason_required`."""
+    user_id = await _user_id(pool)
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
+    )
+    demand_id = await _new_demand(pool, str(repo_id), user_id)
+
+    response = await client.post(
+        f"/api/demands/{demand_id}/block",
+        json={"reason": "   "},
+        headers=_auth(auth_token),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "reason_required"
+
+
+@pytest.mark.asyncio
+async def test_block_reason_in_event(client, auth_token, pool):
+    """O motivo vai no `payload` do evento `demand.blocked` (spec §4.1)."""
+    user_id = await _user_id(pool)
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
+    )
+    demand_id = await _new_demand(pool, str(repo_id), user_id)
+
+    response = await client.post(
+        f"/api/demands/{demand_id}/block",
+        json={"reason": "dependência externa"},
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 200
 
     event = await pool.fetchrow(
         "SELECT payload FROM events WHERE demand_id = $1 AND type = 'demand.blocked'",
@@ -192,60 +367,25 @@ async def test_block_reason_in_event(pool):
 
 
 @pytest.mark.asyncio
-async def test_release_by_non_owner_403(pool):
-    """Só o dono do claim libera a demanda (spec §4.1)."""
-    from app.services import claims as claims_service
-    from app.services import demands as demands_service
-
-    owner_id = await new_user(pool)
-    other_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, owner_id)
-    await claims_service.claim_next(pool, repo="acme/app", user_id=owner_id)
-
-    with pytest.raises(ApiError) as excinfo:
-        await demands_service.release_demand(pool, demand_id=demand_id, actor_id=other_id)
-
-    assert excinfo.value.code == "not_claim_owner"
-    assert excinfo.value.status == 403
-
-
-@pytest.mark.asyncio
-async def test_release_by_owner_returns_to_open(pool):
-    """`release` devolve a demanda para `open` e zera o ownership."""
-    from app.services import claims as claims_service
-    from app.services import demands as demands_service
-
-    owner_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, owner_id)
-    await claims_service.claim_next(pool, repo="acme/app", user_id=owner_id)
-
-    released = await demands_service.release_demand(
-        pool, demand_id=demand_id, actor_id=owner_id
-    )
-
-    assert released["status"] == "open"
-    assert released["claimed_by"] is None
-    assert released["claimed_at"] is None
-
-
-@pytest.mark.asyncio
-async def test_events_recorded(pool):
+async def test_events_recorded(client, auth_token, pool):
     """Uma linha em `events` por transição, com o `type` canônico."""
-    from app.services import claims as claims_service
-    from app.services import demands as demands_service
-
-    user_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, user_id)
-
-    await claims_service.claim_next(pool, repo="acme/app", user_id=user_id)
-    await demands_service.start_demand(pool, demand_id=demand_id, actor_id=user_id)
-    await demands_service.block_demand(
-        pool, demand_id=demand_id, reason="travar", actor_id=user_id
+    user_id = await _user_id(pool)
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
     )
-    await demands_service.release_demand(pool, demand_id=demand_id, actor_id=user_id)
+    demand_id = await _new_demand(pool, str(repo_id), user_id)
+
+    claim = await client.post(
+        "/api/claims", json={"repo": "acme/app"}, headers=_auth(auth_token)
+    )
+    demand_id = claim.json()["demand"]["id"]
+    await client.post(f"/api/demands/{demand_id}/start", headers=_auth(auth_token))
+    await client.post(
+        f"/api/demands/{demand_id}/block",
+        json={"reason": "travar"},
+        headers=_auth(auth_token),
+    )
+    await client.post(f"/api/demands/{demand_id}/release", headers=_auth(auth_token))
 
     types = await pool.fetch(
         "SELECT type FROM events WHERE demand_id = $1 ORDER BY at ASC, id ASC",
@@ -260,182 +400,72 @@ async def test_events_recorded(pool):
 
 
 @pytest.mark.asyncio
-async def test_merge_requires_review(pool):
+async def test_merge_requires_review(client, auth_token, pool):
     """Sem review → 409 `review_required`; review blocking → 409 `review_blocking`."""
-    from app.services import demands as demands_service
-
-    user_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, user_id)
+    user_id = await _user_id(pool)
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
+    )
+    demand_id = await _new_demand(pool, str(repo_id), user_id)
     await pool.execute(
         "UPDATE demands SET status = 'review' WHERE id = $1", uuid.UUID(demand_id)
     )
 
-    with pytest.raises(ApiError) as excinfo:
-        await demands_service.merge_demand(pool, demand_id=demand_id, actor_id=user_id)
-    assert excinfo.value.code == "review_required"
+    response = await client.post(
+        f"/api/demands/{demand_id}/merge", headers=_auth(auth_token)
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "review_required"
 
     await pool.execute(
-        "INSERT INTO reviews (demand_id, verdict) VALUES ($1, 'blocking')", uuid.UUID(demand_id)
-    )
-    with pytest.raises(ApiError) as excinfo:
-        await demands_service.merge_demand(pool, demand_id=demand_id, actor_id=user_id)
-    assert excinfo.value.code == "review_blocking"
-
-
-@pytest.mark.asyncio
-async def test_merge_with_clean_review(pool):
-    """Review `clean` → `review → merged`."""
-    from app.services import demands as demands_service
-
-    user_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, user_id)
-    await pool.execute(
-        "UPDATE demands SET status = 'review' WHERE id = $1", uuid.UUID(demand_id)
-    )
-    await pool.execute(
-        "INSERT INTO reviews (demand_id, verdict) VALUES ($1, 'clean')", uuid.UUID(demand_id)
-    )
-
-    merged = await demands_service.merge_demand(pool, demand_id=demand_id, actor_id=user_id)
-
-    assert merged["status"] == "merged"
-
-
-async def _new_demand(pool, repo_id: str, created_by: str, title: str = "demanda") -> str:
-    row = await pool.fetchrow(
-        """
-        INSERT INTO demands (repo_id, module, title, body, status, created_by)
-        VALUES ($1, 'login', $2, 'corpo', 'open', $3)
-        RETURNING id
-        """,
-        uuid.UUID(repo_id),
-        title,
-        uuid.UUID(created_by),
-    )
-    return str(row["id"])
-
-
-def _payload(value) -> dict:
-    import json
-
-    return json.loads(value) if isinstance(value, str) else value
-
-
-class _Request:
-    headers: dict = {}
-
-
-# --------------------------------------------------------------------------
-# Criação e consulta de demanda
-# --------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_create_demand_open_and_event(pool):
-    """`POST /api/demands` cria a demanda `open` e grava `demand.created`."""
-    from app.routers import demands as demands_router
-
-    user_id = await new_user(pool)
-    await new_repo(pool)
-
-    response = await demands_router.create_demand(
-        request=_Request(),
-        body=demands_router.CreateDemandBody(
-            repo="acme/app", module="login", title="login", body="preciso de login"
-        ),
-        user=sys.modules["app.auth"].User(id=user_id),
-    )
-
-    assert response["status"] == "open"
-    assert response["repo"] == "acme/app"
-    assert response["claimed_by"] is None
-
-    event = await pool.fetchrow(
-        "SELECT * FROM events WHERE demand_id = $1 AND type = 'demand.created'",
-        uuid.UUID(response["id"]),
-    )
-    assert event is not None
-
-
-@pytest.mark.asyncio
-async def test_create_demand_empty_body_400(pool):
-    """Body vazio → 400 `empty_body`."""
-    from app.routers import demands as demands_router
-
-    user_id = await new_user(pool)
-    await new_repo(pool)
-
-    response = await demands_router.create_demand(
-        request=_Request(),
-        body=demands_router.CreateDemandBody(
-            repo="acme/app", module="login", title="login", body="   "
-        ),
-        user=sys.modules["app.auth"].User(id=user_id),
-    )
-
-    assert response.status_code == 400
-    assert b'"empty_body"' in response.body
-
-
-@pytest.mark.asyncio
-async def test_start_demand_by_non_owner_403(pool):
-    """`start` por quem não é o dono do claim → 403 `not_claim_owner`."""
-    from app.services import claims as claims_service
-    from app.services import demands as demands_service
-
-    owner_id = await new_user(pool)
-    other_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, owner_id)
-    await claims_service.claim_next(pool, repo="acme/app", user_id=owner_id)
-
-    with pytest.raises(ApiError) as excinfo:
-        await demands_service.start_demand(pool, demand_id=demand_id, actor_id=other_id)
-
-    assert excinfo.value.code == "not_claim_owner"
-    assert excinfo.value.status == 403
-
-    row = await pool.fetchrow("SELECT status FROM demands WHERE id = $1", uuid.UUID(demand_id))
-    assert row["status"] == "claimed"
-
-
-@pytest.mark.asyncio
-async def test_start_demand_by_owner(pool):
-    """`claimed → in_progress` pelo dono do claim."""
-    from app.services import claims as claims_service
-    from app.services import demands as demands_service
-
-    owner_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, owner_id)
-    await claims_service.claim_next(pool, repo="acme/app", user_id=owner_id)
-
-    started = await demands_service.start_demand(
-        pool, demand_id=demand_id, actor_id=owner_id
-    )
-
-    assert started["status"] == "in_progress"
-
-
-@pytest.mark.asyncio
-async def test_get_demand_carries_artifacts_and_events(pool):
-    """`GET /api/demands/{id}` devolve a demanda + artefatos + eventos."""
-    from app.services import demands as demands_service
-
-    user_id = await new_user(pool)
-    repo_id = await new_repo(pool)
-    demand_id = await _new_demand(pool, repo_id, user_id)
-    await pool.execute(
-        """
-        INSERT INTO artifacts (id, demand_id, repo_id, kind, path, status)
-        VALUES ('BR-009', $1, $2, 'br', 'docs/BR/login/login.md', 'draft')
-        """,
+        "INSERT INTO reviews (demand_id, verdict) VALUES ($1, 'blocking')",
         uuid.UUID(demand_id),
-        uuid.UUID(repo_id),
+    )
+    response = await client.post(
+        f"/api/demands/{demand_id}/merge", headers=_auth(auth_token)
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "review_blocking"
+
+
+@pytest.mark.asyncio
+async def test_merge_with_clean_review(client, auth_token, pool):
+    """Review `clean` → `review → merged`."""
+    user_id = await _user_id(pool)
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
+    )
+    demand_id = await _new_demand(pool, str(repo_id), user_id)
+    await pool.execute(
+        "UPDATE demands SET status = 'review' WHERE id = $1", uuid.UUID(demand_id)
+    )
+    await pool.execute(
+        "INSERT INTO reviews (demand_id, verdict) VALUES ($1, 'clean')",
+        uuid.UUID(demand_id),
     )
 
-    demand = await demands_service.get_demand(pool, demand_id)
+    response = await client.post(
+        f"/api/demands/{demand_id}/merge", headers=_auth(auth_token)
+    )
 
-    assert demand["id"] == demand_id
-    assert [artifact["id"] for artifact in demand["artifacts"]] == ["BR-009"]
-    assert isinstance(demand["events"], list)
+    assert response.status_code == 200
+    assert response.json()["status"] == "merged"
+
+
+@pytest.mark.asyncio
+async def test_illegal_transition_via_api(client, auth_token, pool):
+    """`merge` em demanda `open` → 409 `illegal_transition`."""
+    user_id = await _user_id(pool)
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
+    )
+    demand_id = await _new_demand(pool, str(repo_id), user_id)
+
+    response = await client.post(
+        f"/api/demands/{demand_id}/merge", headers=_auth(auth_token)
+    )
+
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "illegal_transition"
+    assert error["message"] == "open -> merged"
