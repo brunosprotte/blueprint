@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from app.services import generator
 from app.services.generator import (
+    ArtifactPathConflict,
     GenerationContext,
     IllegalDemandState,
     InvalidArtifactPath,
@@ -29,6 +30,11 @@ try:
     from app.auth import require_scope
 except ImportError:  # core do F1 ainda não existe — a rota falha fechada
     require_scope = None
+
+try:
+    from app.db import get_pool
+except ImportError:  # core do F1 ainda não existe — a rota falha fechada
+    get_pool = None
 
 
 def _scope_dependency(scope: str) -> Callable[..., Any]:
@@ -60,11 +66,13 @@ def _error(
 
 
 async def _pool() -> Any:
-    """Pool do Postgres (F1)."""
-    try:
-        from app.db import get_pool
-    except ImportError as exc:
-        raise _error(503, "core_unavailable", "core do servidor indisponível (F1 pendente)") from exc
+    """Pool do Postgres (F1).
+
+    `get_pool` é importado no módulo (e não dentro do handler) para que o
+    vínculo seja resolvido com o core real, como nos demais routers do F4.
+    """
+    if get_pool is None:
+        raise _error(503, "core_unavailable", "core do servidor indisponível (F1 pendente)")
     return await get_pool()
 
 
@@ -120,6 +128,8 @@ async def handle_generate_br(
             str(exc),
             {"module": exc.module, "feature": exc.feature},
         )
+    except ArtifactPathConflict as exc:
+        return 409, _error_body("artifact_path_conflict", str(exc), {"path": exc.path})
     except IllegalDemandState as exc:
         return 409, _error_body("illegal_transition", str(exc))
 
@@ -195,6 +205,8 @@ async def handle_generate_specs(
             str(exc),
             {"module": exc.module, "feature": exc.feature},
         )
+    except ArtifactPathConflict as exc:
+        return 409, _error_body("artifact_path_conflict", str(exc), {"path": exc.path})
     except IllegalDemandState as exc:
         return 409, _error_body("illegal_transition", str(exc))
 
