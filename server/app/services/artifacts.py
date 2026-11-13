@@ -7,8 +7,8 @@ O banco é a autoridade do **status**; o repo de dev é a autoridade do
 from __future__ import annotations
 
 import hashlib
+import importlib
 import re
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -17,6 +17,7 @@ from app.db import fetch, fetchrow
 from app.services.lifecycle import (
     ApiError,
     apply_artifact_transition,
+    as_json,
     as_uuid,
     jsonable,
     record_event,
@@ -26,7 +27,7 @@ from app.services.lifecycle import (
 
 ID_PATTERN = re.compile(r"^(BR|SPEC)-\d{3}$")
 KINDS = {"br": "BR", "spec": "SPEC", "ri": "RI"}
-DOUBTS_DIR = {"br": "duvidas-br", "spec": "duvidas-spec", "ri": "duvidas-ri"}
+DOUBTS_DIR = {"br": "duvidas-br", "spec": "duvidas-spec"}
 ARTIFACT_LIST_COLUMNS = (
     "a.id, a.demand_id, a.repo_id, a.kind, a.module, a.feature, a.path, a.sha, "
     "a.status, a.version, a.doubts_index, a.created_at, a.updated_at"
@@ -171,7 +172,57 @@ async def list_pending(pool, *, repo: str, demand_id: str | None = None) -> list
             "content": r["content"] or "",
         }
         for r in rows
-    ]
+    ] + await _pending_doubts_files(pool, repo=repo, demand_id=demand_id)
+
+
+async def _pending_doubts_files(pool, *, repo: str, demand_id: str | None) -> list[dict]:
+    """Arquivos de dúvidas que o `pull` precisa escrever no repo de dev.
+
+    O sidecar **não** é linha de `artifacts` (Contrato Comum §8.4 D1): o canal de
+    publicação é o evento `doubts_file_rendered` (F5/F6), com `path`, `content`
+    e `sha`. O último evento de cada artefato vence.
+    """
+    owner, name = split_repo(repo)
+    args: list[object] = [owner, name]
+    clause = (
+        "e.type = 'doubts_file_rendered'"
+        " AND r.owner = $1 AND r.name = $2"
+    )
+    if demand_id:
+        args.append(as_uuid(demand_id))
+        clause += " AND e.demand_id = $3"
+
+    rows = await fetch(
+        pool,
+        f"""
+        SELECT e.payload, e.at, e.id
+          FROM events e
+          JOIN artifacts a ON a.id = e.artifact_id
+          JOIN repos r ON r.id = a.repo_id
+         WHERE {clause}
+         ORDER BY e.at DESC, e.id DESC
+        """,
+        *args,
+    )
+
+    files: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        payload = as_json(row["payload"]) or {}
+        path = str(payload.get("path") or "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        files.append(
+            {
+                "id": str(payload.get("artifact_id") or ""),
+                "kind": "doubts",
+                "path": path,
+                "status": None,
+                "content": payload.get("content") or "",
+            }
+        )
+    return files
 
 
 async def list_doubts(pool, artifact_id: str) -> list[dict]:
@@ -235,10 +286,6 @@ def sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 async def _next_artifact_id(conn, kind: str) -> str:
     prefix = KINDS[kind]
     await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"artifact-id:{prefix}")
@@ -253,29 +300,75 @@ async def _next_artifact_id(conn, kind: str) -> str:
     return f"{prefix}-{int(row['next']):03d}"
 
 
+def _optional_function(module_name: str, name: str):
+    """Função de outro módulo (F5/F6) — `None` enquanto a fase não existir."""
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        return None
+    return getattr(module, name, None)
+
+
+#: Campos do frontmatter que o servidor aloca — o sync os preserva
+#: (Contrato Comum §8.4 D5): a origem da verdade dos IDs é o servidor.
+_ALLOCATED_FIELDS = ("status", "createdFrom", "dependsOn", "timestamp")
+
+
+def _merge_frontmatter(
+    allocated: dict,
+    incoming: dict,
+    *,
+    artifact_id: str,
+    doubts_index: str | None,
+) -> dict:
+    """Frontmatter final: preserva o que o servidor alocou, adota o resto do repo.
+
+    O sync **não** reescreve o frontmatter do servidor (Contrato Comum §8.4 D5):
+    `id` e `doubtsIndex` são sempre os do servidor; `status`, `createdFrom`,
+    `dependsOn` e `timestamp` são os alocados; o resto (title, description,
+    tags, module, feature, version...) vem do repo, que é a fonte do conteúdo.
+    """
+    merged = dict(incoming)
+    for field in _ALLOCATED_FIELDS:
+        value = allocated.get(field)
+        if value not in (None, "", []):
+            merged[field] = value
+    merged["id"] = artifact_id
+    if doubts_index:
+        merged["doubtsIndex"] = doubts_index
+    return merged
+
+
+def _render_document(frontmatter: dict, body: str) -> str:
+    """Markdown do artefato: frontmatter mesclado + corpo. O render do F5 quando existe."""
+    render = _optional_function("app.services.generator", "render_document")
+    if render is not None:
+        return render(frontmatter, body)
+    dumped = yaml.safe_dump(
+        frontmatter, allow_unicode=True, sort_keys=False, default_flow_style=False
+    ).rstrip()
+    return f"---\n{dumped}\n---\n\n{body.strip()}\n"
+
+
 def doubts_index_path(kind: str, artifact_id: str) -> str:
-    return f"docs/implementation-artifacts/{DOUBTS_DIR[kind]}/{artifact_id}.md"
+    """Caminho do arquivo de dúvidas do artefato (convenção do F6/META-005)."""
+    path_fn = _optional_function("app.services.doubts", "doubts_file_path")
+    if path_fn is not None:
+        return path_fn(artifact_id, kind)
+    folder = DOUBTS_DIR.get(kind, "duvidas-spec")
+    return f"docs/implementation-artifacts/{folder}/{artifact_id}.md"
 
 
-def render_doubts_template(kind: str, artifact_id: str, timestamp: str) -> str:
-    """Template inicial do arquivo de dúvidas (META-006 §5)."""
-    return f"""---
-type: Dúvidas
-artifact: {artifact_id}
-artifactStatus: draft
-updatedAt: {timestamp}
----
+def render_doubts_file(artifact_id: str, status: str) -> str | None:
+    """Conteúdo do arquivo de dúvidas — **renderizado pelo F6** (formato canônico v1).
 
-# Dúvidas — {artifact_id}
-
-## Estado
-
-Nenhuma pendência registrada.
-
-## Histórico
-
-- {timestamp} — arquivo inicializado.
-"""
+    Import tardio: sem o F6, **nenhum** arquivo é escrito — nunca um arquivo em
+    formato errado (Contrato Comum §8.4 D2).
+    """
+    render = _optional_function("app.services.doubts", "render_doubts_file")
+    if render is None:
+        return None
+    return render(artifact_id, [], status)
 
 
 # --------------------------------------------------------------------------
@@ -291,23 +384,110 @@ def _repo_root() -> Path:
         return Path(__file__).resolve().parents[3]
 
 
-def build_universe(pool):
-    """Universo de links: corpus do método (F2) + artefatos sincronizados."""
+class DoubtsSidecars:
+    """Universo dos sidecars de dúvidas — o caminho que o PATH-002 resolve.
+
+    O sidecar **nunca** vira linha de `artifacts` (Contrato Comum §8.4 D1): o
+    caminho vive em `artifacts.doubts_index` e o conteúdo no evento
+    `doubts_file_rendered`. É esse índice que o linter consulta — o servidor
+    nunca lê o filesystem do repo de dev (invariante 1).
+    """
+
+    def __init__(self, pool):
+        self._pool = pool
+        self._paths: set[str] = set()
+
+    async def refresh(self) -> int:
+        rows = await self._pool.fetch(
+            "SELECT doubts_index FROM artifacts WHERE doubts_index IS NOT NULL"
+        )
+        self._paths = {row["doubts_index"] for row in rows if row["doubts_index"]}
+        return len(self._paths)
+
+    def exists(self, ref: str) -> bool:
+        return self.resolve(ref) is not None
+
+    def resolve(self, ref: str) -> str | None:
+        candidate = (ref or "").strip().replace("\\", "/")
+        if candidate in self._paths:
+            return candidate
+        return None
+
+
+async def build_universe(pool):
+    """Universo de links do linter.
+
+    Três partes: o corpus do **método** (repo blueprint — resolve META/PAT/TP),
+    os **artefatos sincronizados** (resolve os IDs) e os **sidecars de dúvidas**
+    (resolve o `doubtsIndex` do PATH-002). Nada é lido do repo de dev no disco:
+    o repo é fonte de *conteúdo* via `sync`, nunca via filesystem (invariante 1).
+    """
     try:
-        from app.lint.runner import CompositeUniverse, MethodCorpus, SyncedArtifacts
+        from app.lint.runner import CompositeUniverse, SyncedArtifacts
     except ImportError:
         return None
     try:
+        synced = SyncedArtifacts(pool)
+        await synced.refresh()
+        sidecars = DoubtsSidecars(pool)
+        await sidecars.refresh()
         return CompositeUniverse(
-            MethodCorpus(_repo_root() / "docs"),
-            SyncedArtifacts(pool),
+            _method_corpus(_repo_root()),
+            synced,
+            sidecars,
         )
     except Exception:
         return None
 
 
+#: Corpus do método indexado em memória, por raiz (mesmo cache do router de lint).
+_CORPUS_CACHE: dict[str, object] = {}
+
+
+def _method_corpus(root: Path):
+    """`MethodCorpus` memoizado por raiz — reindexar o disco a cada sync seria caro."""
+    from app.lint.runner import MethodCorpus
+
+    key = str(root)
+    corpus = _CORPUS_CACHE.get(key)
+    if corpus is None:
+        corpus = MethodCorpus(root)
+        _CORPUS_CACHE[key] = corpus
+    return corpus
+
+
+def _lint_batch(items: list[dict], universe) -> dict[str, list]:
+    """Findings por path — o linter roda em **LOTE**, nunca documento a documento.
+
+    As regras cruzadas do F2 (BR-004: toda AC da BR coberta por alguma SPEC)
+    só fazem sentido com as SPECs do mesmo lote (Contrato Comum §8.4 D6).
+    Documento isolado, sem SPEC no lote → BR-004 não é aplicável.
+    """
+    if universe is None:
+        return {}
+    try:
+        from app.lint.runner import lint_batch, parse_document
+    except ImportError:
+        return {}
+    docs = [
+        parse_document(item["path"], item["content"], repo_id=item.get("repo_id"))
+        for item in items
+        if item["kind"] in ("br", "spec")
+    ]
+    if not docs:
+        return {}
+    try:
+        findings = lint_batch(docs, universe)
+    except Exception:
+        return {}
+    grouped: dict[str, list] = {}
+    for finding in findings:
+        grouped.setdefault(finding.path or "", []).append(finding)
+    return grouped
+
+
 def _lint_doc(path, content, frontmatter, body, kind, repo_id, universe):
-    """Roda o linter do F2. `None` = linter indisponível (não promote)."""
+    """Roda o linter do F2 num documento. `None` = linter indisponível."""
     if universe is None:
         return None
     try:
@@ -341,9 +521,10 @@ def _finding_dict(finding) -> dict:
     }
 
 
-def _lint_counts(findings) -> dict:
-    if findings is None:
+def _lint_counts(findings, available: bool = True) -> dict:
+    if not available:
         return {"error": 0, "warning": 0, "available": False}
+    findings = findings or []
     errors = sum(1 for f in findings if getattr(f, "severity", None) == "error")
     warnings = sum(1 for f in findings if getattr(f, "severity", None) == "warning")
     return {"error": errors, "warning": warnings, "available": True}
@@ -366,72 +547,100 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
         "lint_warning": 0,
     }
 
+    items: list[dict] = []
+    for doc in docs:
+        path = validate_path(doc.get("path") or "")
+        content = doc.get("content") or ""
+        kind = classify_path(path)
+        if kind is None:
+            # O sidecar de dúvidas (`docs/implementation-artifacts/**`) nunca vira
+            # linha de `artifacts` (Contrato Comum §8.4 D1).
+            summary["ignored"] += 1
+            continue
+        frontmatter, body = parse_frontmatter(content)
+        items.append(
+            {
+                "path": path,
+                "content": content,
+                "sha": sha256(content),
+                "kind": kind,
+                "frontmatter": frontmatter,
+                "body": body,
+            }
+        )
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             repo_id = await _ensure_repo_conn(conn, repo)
-            universe = build_universe(pool)
+            universe = await build_universe(pool)
+            findings_by_path = _lint_batch(items, universe)
+            pending_edges: list[tuple[str, str, dict]] = []
 
-            for doc in docs:
-                path = validate_path(doc.get("path") or "")
-                content = doc.get("content") or ""
-                sha = sha256(content)
-                kind = classify_path(path)
+            for item in items:
+                path = item["path"]
+                content = item["content"]
+                sha = item["sha"]
+                kind = item["kind"]
+                frontmatter = item["frontmatter"]
 
-                if kind is None:
-                    summary["ignored"] += 1
-                    continue
-
-                frontmatter, body = parse_frontmatter(content)
-                row, created = await _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
+                (
+                    row,
+                    created,
+                    final_sha,
+                    final_content,
+                ) = await _upsert_artifact(
+                    conn, repo_id, path, content, sha, kind, frontmatter
+                )
 
                 artifact_id = row["id"]
                 status = row["status"]
                 promoted = False
                 changed = created
 
-                findings = _lint_doc(path, content, frontmatter, body, kind, str(repo_id), universe)
-                lint_result = _lint_counts(findings)
+                lint_result = _lint_counts(
+                    findings_by_path.get(path, []), available=universe is not None
+                )
 
-                if not created:
+                if not created and final_sha != row["sha"]:
+                    # O repo divergiu do que o servidor tem.
                     if status == "draft":
-                        if row["sha"] == sha:
-                            if lint_result["available"] and lint_result["error"] == 0:
-                                await apply_artifact_transition(
-                                    conn,
-                                    artifact_id,
-                                    "pending",
-                                    actor_id=actor_id,
-                                    event_type="artifact.promoted",
-                                )
-                                promoted = True
-                                status = "pending"
-                        else:
-                            raise ApiError(
-                                "content_diverged",
-                                "conteúdo divergente do servidor",
-                                409,
-                                {
-                                    "path": path,
-                                    "server_sha": row["sha"],
-                                    "client_sha": sha,
-                                    "server_status": row["status"],
-                                },
-                            )
-                    elif row["sha"] != sha or (row["content"] or "") != content:
-                        # O repo é autoritativo para o **conteúdo**; o status é do banco.
-                        await conn.execute(
-                            """
-                            UPDATE artifacts
-                               SET content = $2, sha = $3, updated_at = now()
-                             WHERE id = $1
-                            """,
-                            artifact_id,
-                            content,
-                            sha,
+                        raise ApiError(
+                            "content_diverged",
+                            "conteúdo divergente do servidor",
+                            409,
+                            {
+                                "path": path,
+                                "server_sha": row["sha"],
+                                "client_sha": sha,
+                                "server_status": row["status"],
+                            },
                         )
-                        changed = True
+                    # O repo é autoritativo para o **conteúdo**; o status é do banco.
+                    await conn.execute(
+                        """
+                        UPDATE artifacts
+                           SET content = $2, sha = $3, updated_at = now()
+                         WHERE id = $1
+                        """,
+                        artifact_id,
+                        final_content,
+                        final_sha,
+                    )
+                    changed = True
+                elif not created and status == "draft":
+                    # Mesmo conteúdo (após o merge): o artefato está no repo.
+                    if lint_result["available"] and lint_result["error"] == 0:
+                        await apply_artifact_transition(
+                            conn,
+                            artifact_id,
+                            "pending",
+                            actor_id=actor_id,
+                            event_type="artifact.promoted",
+                        )
+                        promoted = True
+                        status = "pending"
 
-                await _sync_edges(conn, artifact_id, frontmatter)
+                pending_edges.append((artifact_id, kind, frontmatter))
 
                 summary["artifacts"] += 1
                 summary["created"] += int(created)
@@ -453,7 +662,7 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                     payload = {
                         "path": path,
                         "id": artifact_id,
-                        "sha": sha,
+                        "sha": final_sha,
                         "status": status,
                         "promoted": promoted,
                         "changed": changed,
@@ -478,17 +687,27 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                         "created": created,
                         "promoted": promoted,
                         "changed": changed,
-                        "sha": sha,
+                        "sha": final_sha,
                         "lint": {"error": lint_result["error"], "warning": lint_result["warning"]},
                     }
                 )
+
+            # As arestas sao gravadas depois do lote: o `parent` e o `child`
+            # precisam ja existir em `artifacts` (FK).
+            for artifact_id, kind, frontmatter in pending_edges:
+                await _sync_edges(conn, artifact_id, kind, frontmatter)
 
     results.sort(key=lambda item: item["path"])
     return {"repo": repo, "artifacts": results, "summary": summary}
 
 
 async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter):
-    """Lê (ou cria) a linha do artefato. Devolve `(row, created)`."""
+    """Lê (ou cria) a linha do artefato.
+
+    Devolve `(row, created, final_sha, final_content)`: o frontmatter guardado é
+    o **mesclado** — o servidor preserva o que alocou e adota o resto do repo
+    (Contrato Comum §8.4 D5).
+    """
     row = await conn.fetchrow(
         """
         SELECT * FROM artifacts
@@ -499,7 +718,16 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
         path,
     )
     if row is not None:
-        return row, False
+        allocated, _ = parse_frontmatter(row["content"] or "")
+        merged = _merge_frontmatter(
+            allocated,
+            frontmatter,
+            artifact_id=row["id"],
+            doubts_index=row["doubts_index"],
+        )
+        _, body = parse_frontmatter(content)
+        final_content = _render_document(merged, body)
+        return row, False, sha256(final_content), final_content
 
     artifact_id = _id_from_frontmatter(frontmatter)
     if artifact_id is not None:
@@ -510,12 +738,18 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
     if artifact_id is None:
         artifact_id = await _next_artifact_id(conn, kind)
 
-    timestamp = _now_iso()
     module = frontmatter.get("module") or PurePosixPath(path).parent.name
     feature = frontmatter.get("feature") or PurePosixPath(path).stem
     version = str(frontmatter.get("version") or "1.0.0")
     doubts_index = doubts_index_path(kind, artifact_id)
-    doubts_content = render_doubts_template(kind, artifact_id, timestamp)
+    doubts_content = render_doubts_file(artifact_id, "draft")
+
+    merged = _merge_frontmatter(
+        {}, frontmatter, artifact_id=artifact_id, doubts_index=doubts_index
+    )
+    _, body = parse_frontmatter(content)
+    final_content = _render_document(merged, body)
+    final_sha = sha256(final_content)
 
     inserted = await conn.fetchrow(
         """
@@ -532,14 +766,14 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
         module,
         feature,
         path,
-        sha,
+        final_sha,
         version,
-        content,
+        final_content,
         doubts_index,
         doubts_content,
     )
     if inserted is not None:
-        return inserted, True
+        return inserted, True, final_sha, final_content
 
     # Outro sync criou a linha no meantime — serializa e lê a versão existente.
     row = await conn.fetchrow(
@@ -553,7 +787,16 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
     )
     if row is None:
         raise ApiError("sync_conflict", "artefato criado por outro sync", 409, {"path": path})
-    return row, False
+    allocated, _ = parse_frontmatter(row["content"] or "")
+    merged = _merge_frontmatter(
+        allocated,
+        frontmatter,
+        artifact_id=row["id"],
+        doubts_index=row["doubts_index"],
+    )
+    _, body = parse_frontmatter(content)
+    final_content = _render_document(merged, body)
+    return row, False, sha256(final_content), final_content
 
 
 def _id_from_frontmatter(frontmatter: dict) -> str | None:
@@ -563,22 +806,44 @@ def _id_from_frontmatter(frontmatter: dict) -> str | None:
     return None
 
 
-async def _sync_edges(conn, artifact_id: str, frontmatter: dict) -> None:
-    """Arestas do grafo a partir do frontmatter (spec §5.8)."""
-    edges: list[tuple[str, str]] = []
+async def _sync_edges(conn, artifact_id: str, kind: str, frontmatter: dict) -> None:
+    """Arestas do grafo a partir do frontmatter.
+
+    Direção canônica (Contrato Comum §8.4 D4):
+
+    | tipo | parent | child |
+    | --- | --- | --- |
+    | `derives_from` | a SPEC | a BR de origem |
+    | `depends_on` | o dependente | a dependência |
+    | `tests` | a SPEC | o RI que a testa |
+
+    A aresta `tests` nasce do arquivo **RI** (o frontmatter do RI lista as SPECs
+    que ele testa — §8.4 D3); no RI, `parent` é a SPEC citada e `child` é o RI.
+    """
+    edges: list[tuple[str, str, str]] = []
+
     created_from = frontmatter.get("createdFrom")
     if isinstance(created_from, str) and created_from:
-        edges.append((created_from, "derives_from"))
-    for child in frontmatter.get("dependsOn") or []:
-        if isinstance(child, str) and child:
-            edges.append((child, "depends_on"))
-    for child in frontmatter.get("tests") or []:
-        if isinstance(child, str) and child:
-            edges.append((child, "tests"))
+        edges.append((artifact_id, created_from, "derives_from"))
 
-    for child_id, edge_type in edges:
-        exists = await conn.fetchval("SELECT 1 FROM artifacts WHERE id = $1", child_id)
-        if not exists:
+    for dependency in frontmatter.get("dependsOn") or []:
+        if isinstance(dependency, str) and dependency:
+            edges.append((artifact_id, dependency, "depends_on"))
+
+    for other in frontmatter.get("tests") or []:
+        if not isinstance(other, str) or not other:
+            continue
+        if kind == "ri":
+            edges.append((other, artifact_id, "tests"))
+        else:
+            edges.append((artifact_id, other, "tests"))
+
+    for parent_id, child_id, edge_type in edges:
+        # Foreign key: as duas pontas precisam existir em `artifacts`.
+        existing = await conn.fetch(
+            "SELECT id FROM artifacts WHERE id IN ($1, $2)", parent_id, child_id
+        )
+        if len(existing) < 2:
             continue
         await conn.execute(
             """
@@ -586,7 +851,7 @@ async def _sync_edges(conn, artifact_id: str, frontmatter: dict) -> None:
             VALUES ($1, $2, $3)
             ON CONFLICT (parent_id, child_id, type) DO NOTHING
             """,
-            artifact_id,
+            parent_id,
             child_id,
             edge_type,
         )
@@ -597,7 +862,7 @@ async def _sync_edges(conn, artifact_id: str, frontmatter: dict) -> None:
 # --------------------------------------------------------------------------
 async def _lint_for_artifact(pool, artifact: dict):
     """Lint estrutural do artefato — `None` se o linter (F2) não existir."""
-    universe = build_universe(pool)
+    universe = await build_universe(pool)
     if universe is None:
         return None
     frontmatter, body = parse_frontmatter(artifact.get("content") or "")
@@ -650,6 +915,16 @@ async def request_review(pool, *, artifact_id: str, actor_id: str) -> dict:
     )
 
 
+def _pipeline_unavailable(artifact_id: str) -> ApiError:
+    """503 do pipeline de aprovação (F6 ainda não entregue o `run_pipeline`)."""
+    return ApiError(
+        "pipeline_unavailable",
+        "pipeline de aprovação indisponível",
+        503,
+        {"id": artifact_id},
+    )
+
+
 async def approve(pool, *, artifact_id: str, actor_id: str) -> dict:
     """`on user review` → `on agents review` + pipeline do F6.
 
@@ -670,12 +945,12 @@ async def approve(pool, *, artifact_id: str, actor_id: str) -> dict:
     try:
         from app.services import reviewers  # F6 — import tardio
     except ImportError:
-        raise ApiError(
-            "pipeline_unavailable",
-            "pipeline de aprovação indisponível",
-            503,
-            {"id": artifact_id},
-        ) from None
+        raise _pipeline_unavailable(artifact_id) from None
+
+    run_pipeline = getattr(reviewers, "run_pipeline", None)
+    if run_pipeline is None:
+        # O módulo do F6 existe como stub, mas o pipeline ainda não.
+        raise _pipeline_unavailable(artifact_id) from None
 
     await apply_artifact_transition(
         pool,
@@ -684,7 +959,7 @@ async def approve(pool, *, artifact_id: str, actor_id: str) -> dict:
         actor_id=actor_id,
         event_type="artifact.agents_review_started",
     )
-    result = await reviewers.run_pipeline(artifact)
+    result = await run_pipeline(artifact)
     to_dict = getattr(result, "to_dict", None)
     return {
         "artifact": await get_artifact(pool, artifact_id),

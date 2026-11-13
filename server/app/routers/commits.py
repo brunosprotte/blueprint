@@ -16,6 +16,7 @@ from app.services import commits as service
 from app.services.lifecycle import (
     ApiError,
     api_route,
+    parse_uuid,
     resolve_token_repo,
 )
 
@@ -45,7 +46,13 @@ async def record_commit(
 ) -> dict:
     repo = await resolve_token_repo(request)
     if not repo:
-        raise ApiError("invalid_repo", "token sem repo", 400)
+        raise ApiError(
+            "invalid_repo",
+            "token sem repo: o repo do commit vem do token — use um token de API "
+            "preso a um repo (owner/name) para registrar o commit",
+            400,
+            {"repo": None},
+        )
     pool = await get_pool()
     return await service.record_commit(
         pool,
@@ -74,6 +81,28 @@ async def list_commits(
         pool,
         demand_id=demand,
         repo=repo,
+        include_orphaned=include_orphaned,
+        limit=limit,
+        offset=offset,
+    )
+    return {"commits": commits}
+
+
+@router.get("/commits/{demand_id}")
+@api_route
+async def list_commits_of_demand(
+    demand_id: str,
+    include_orphaned: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+    user: User = Depends(require_user),
+) -> dict:
+    """Commits de uma demanda (design master §17). Convive com `GET /api/commits`."""
+    pool = await get_pool()
+    commits = await service.list_commits(
+        pool,
+        demand_id=parse_uuid(demand_id),
+        repo=None,
         include_orphaned=include_orphaned,
         limit=limit,
         offset=offset,
