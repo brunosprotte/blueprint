@@ -1,0 +1,16 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: sdd
+      POSTGRES_PASSWORD: sdd
+      POSTGRES_DB: sdd
+    ports: ["5432:5432"]
+    volumes: ["sdd_pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sdd"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  sdd_pgdata:
