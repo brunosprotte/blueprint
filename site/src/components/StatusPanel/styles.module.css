@@ -1,0 +1,192 @@
+.panel {
+  margin: 1.5rem 0;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-end;
+  margin-bottom: 1rem;
+}
+
+.filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.filter select,
+.reload {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: var(--ifm-global-radius);
+  background: var(--ifm-background-surface-color);
+  color: inherit;
+  font: inherit;
+}
+
+.reload {
+  cursor: pointer;
+}
+
+.stream {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.stream-live {
+  color: var(--ifm-color-success-darkest);
+}
+
+.stream-polling {
+  color: var(--ifm-color-warning-darkest);
+}
+
+.error {
+  color: var(--ifm-color-danger-darkest);
+}
+
+.empty {
+  color: var(--ifm-color-emphasis-600);
+  font-style: italic;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.table th,
+.table td {
+  border-bottom: 1px solid var(--ifm-color-emphasis-200);
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.row {
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--ifm-color-emphasis-100);
+}
+
+.rowSelected {
+  background: var(--ifm-color-emphasis-200);
+  font-weight: 600;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--ifm-color-emphasis-200);
+  font-size: 0.75rem;
+  text-transform: lowercase;
+}
+
+.detail {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--ifm-color-emphasis-200);
+}
+
+.detailTitle {
+  font-size: 1.2rem;
+  margin-bottom: 0.5rem;
+}
+
+.detailHeading {
+  font-size: 0.95rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ifm-color-emphasis-700);
+  margin-top: 1.5rem;
+}
+
+.artifactList {
+  list-style: none;
+  padding-left: 0;
+}
+
+.artifactList li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.4rem 0;
+}
+
+.artifactId {
+  font-family: var(--ifm-font-family-monospace);
+}
+
+.artifactPath {
+  color: var(--ifm-color-emphasis-600);
+  font-size: 0.85rem;
+}
+
+.approve {
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.approveButton {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--ifm-color-primary);
+  border-radius: var(--ifm-global-radius);
+  background: var(--ifm-color-primary);
+  color: var(--ifm-color-primary-contrast-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.approveButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.approveOk {
+  color: var(--ifm-color-success-darkest);
+  font-size: 0.85rem;
+}
+
+.approveError {
+  color: var(--ifm-color-danger-darkest);
+  font-size: 0.85rem;
+}
+
+.timeline {
+  list-style: none;
+  padding-left: 0;
+}
+
+.timelineItem {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px dashed var(--ifm-color-emphasis-200);
+  font-size: 0.85rem;
+}
+
+.timelineType {
+  font-family: var(--ifm-font-family-monospace);
+  min-width: 12rem;
+}
+
+.timelineAt {
+  color: var(--ifm-color-emphasis-600);
+  min-width: 12rem;
+}
+
+.timelinePayload {
+  color: var(--ifm-color-emphasis-700);
+}

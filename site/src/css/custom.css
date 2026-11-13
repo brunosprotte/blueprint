@@ -1,0 +1,25 @@
+/**
+ * custom.css — overrides mínimos do preset classic (F10).
+ * O site é um back-office: sem identidade visual de produto, só legibilidade.
+ */
+
+:root {
+  --ifm-color-primary: #2e5d8a;
+  --ifm-color-primary-dark: #29527a;
+  --ifm-color-primary-darker: #274d72;
+  --ifm-color-primary-darkest: #20405e;
+  --ifm-color-primary-light: #33689a;
+  --ifm-color-primary-lighter: #376ea3;
+  --ifm-color-primary-lightest: #437fbb;
+  --ifm-code-font-size: 92%;
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #7cb1e0;
+  --ifm-color-primary-dark: #5c9bd6;
+  --ifm-color-primary-darker: #4d93d1;
+  --ifm-color-primary-darkest: #2879bf;
+  --ifm-color-primary-light: #9cc7ea;
+  --ifm-color-primary-lighter: #abd0ea;
+  --ifm-color-primary-lightest: #d9e9f6;
+}
