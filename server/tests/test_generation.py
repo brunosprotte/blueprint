@@ -331,9 +331,17 @@ SPEC_SECTIONS = (
 
 def _spec_body(title: str, acs: list[str]) -> str:
     """Corpo de uma SPEC com as 14 seções de SK-002 §10."""
-    sections = "".join(f"\n## {section}\n\nconteúdo de {section}\n" for section in SPEC_SECTIONS)
     ac_lines = "\n".join(f"- {ac}" for ac in acs)
-    return f"## Objetivo\n\n{title}\n{sections}\n## Acceptance Criteria atendidos\n\n{ac_lines}\n"
+    blocks = []
+    for section in SPEC_SECTIONS:
+        if section == "Acceptance Criteria atendidos":
+            content = ac_lines
+        elif section == "Objetivo":
+            content = title
+        else:
+            content = f"conteúdo de {section}"
+        blocks.append(f"## {section}\n\n{content}\n")
+    return "\n".join(blocks)
 
 
 def spec_payload() -> dict[str, Any]:
