@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "q": "Knowledge Resolution Engine",
+      "corpus_id": "method",
+      "expect_ref": "META/META-001_KNOWLEDGE_RESOLUTION_ENGINE.md",
+      "expect_heading": "META-001 — Knowledge Resolution Engine"
+    },
+    {
+      "q": "knowledge stability",
+      "corpus_id": "method",
+      "expect_ref": "META/META-000_BLUEPRINT_KNOWLEDGE_MODEL.md",
+      "expect_heading": "6. Knowledge Stability"
+    },
+    {
+      "q": "runtime execution model",
+      "corpus_id": "method",
+      "expect_ref": "META/META-003_RUNTIME_EXECUTION_MODEL.md",
+      "expect_heading": "META-003 — Runtime Execution Model"
+    },
+    {
+      "q": "doubts index synchronization",
+      "corpus_id": "method",
+      "expect_ref": "META/META-006_DOUBTS_INDEX_SYNCHRONIZATION_FLOW.md",
+      "expect_heading": "META-006 — Doubts Index Synchronization Flow"
+    },
+    {
+      "q": "stable UI identifier",
+      "corpus_id": "method",
+      "expect_ref": "PAT/PAT-001_STABLE_UI_IDENTIFIER.md",
+      "expect_heading": "PAT-001 — Stable UI Identifier"
+    },
+    {
+      "q": "stable identifier construction",
+      "corpus_id": "method",
+      "expect_ref": "PAT/PAT-001_STABLE_UI_IDENTIFIER.md",
+      "expect_heading": "Section: Hinge — Identifier Construction"
+    },
+    {
+      "q": "prisma directory structure",
+      "corpus_id": "method",
+      "expect_ref": "TS/TS-002_PRIMSA_PERSISTENCE_STANDARDS.md",
+      "expect_heading": "4. Directory Structure"
+    },
+    {
+      "q": "zod schema parse",
+      "corpus_id": "method",
+      "expect_ref": "TS/TS-003_ZOD_VALIDATION_STANDARDS.md",
+      "expect_heading": "3. Technology Mapping"
+    },
+    {
+      "q": "shadcn UI components",
+      "corpus_id": "method",
+      "expect_ref": "TS/TS-005_SHADCN_UI_STANDARDS.md",
+      "expect_heading": "4. Component Organization"
+    },
+    {
+      "q": "backend unit test standard",
+      "corpus_id": "method",
+      "expect_ref": "TS/TS-006_BACKEND_UNIT_TESTS_STANDARDS.md",
+      "expect_heading": "TS-006 — Backend Unit Testing Standard"
+    },
+    {
+      "q": "testing library vitest",
+      "corpus_id": "method",
+      "expect_ref": "TS/TS-007_FRONTEND_UNIT_TESTS_STANDARDS.md",
+      "expect_heading": "4. Recommended Tooling"
+    },
+    {
+      "q": "TypeScript representation standard",
+      "corpus_id": "method",
+      "expect_ref": "LS/LS-001_TYPESCRIPT_REPRESENTATION_STANDARD.md",
+      "expect_heading": "LS-001 — TypeScript Representation Standard"
+    },
+    {
+      "q": "Next.js full stack",
+      "corpus_id": "method",
+      "expect_ref": "TP/TP-001_NEXTJS_FULL_STACK.md",
+      "expect_heading": "TP-001 — Next.js Full Stack"
+    },
+    {
+      "q": "canonical CRUD reference implementation",
+      "corpus_id": "method",
+      "expect_ref": "RI/RI-001_CANONICAL_CRUD_REFERENCE_IMPLEMENTATION.md",
+      "expect_heading": "RI-001 — Canonical CRUD Reference Implementation"
+    },
+    {
+      "q": "OKF bundle consumer",
+      "corpus_id": "method",
+      "expect_ref": "RI/RI-002_OKF_BUNDLE_CONSUMER.md",
+      "expect_heading": "RI-002 — OKF Bundle Consumer"
+    },
+    {
+      "q": "business source of truth",
+      "corpus_id": "method",
+      "expect_ref": "ES/ES-000_ENGINEERING_PRINCIPLES.md",
+      "expect_heading": "EP-002 — Business is the Source of Truth"
+    },
+    {
+      "q": "domain model entity",
+      "corpus_id": "method",
+      "expect_ref": "ES/ES-003_DOMAIN_MODEL.md",
+      "expect_heading": "Section: Hinge — What Belongs in Domain"
+    },
+    {
+      "q": "input port model",
+      "corpus_id": "method",
+      "expect_ref": "ES/ES-006_INPUT_PORT_MODEL.md",
+      "expect_heading": "ES-006 — Input Port Model"
+    },
+    {
+      "q": "output port external capabilities",
+      "corpus_id": "method",
+      "expect_ref": "ES/ES-007_OUTPUT_PORT_MODEL.md",
+      "expect_heading": "Section: Hinge — When to Create an Output Port"
+    },
+    {
+      "q": "adapter model",
+      "corpus_id": "method",
+      "expect_ref": "ES/ES-009_ADAPTER_MODEL.md",
+      "expect_heading": "ES-009 — Adapter Model"
+    }
+  ]
+}
