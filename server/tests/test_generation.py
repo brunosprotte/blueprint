@@ -554,6 +554,36 @@ async def test_spec_edges_unresolved_is_skipped_with_event(pool, demand) -> None
     assert event["reason"] == "not_resolved"
 
 
+async def test_spec_edges_tests_type_is_ignored_silently(pool, demand) -> None:
+    """Aresta `tests` do modelo é ignorada — sem aresta e sem evento (§8.4 D3).
+
+    A aresta `tests` nasce do arquivo RI (o frontmatter do RI lista as SPECs que ele
+    testa) e o F4 a cria no `sync`. O gerador não a resolve e não emite
+    `spec_edge_unresolved` — mesmo quando o alvo é um RI que existe no banco.
+    """
+    await pool.execute(
+        "INSERT INTO artifacts (id, kind, path, status) VALUES ('RI-001','ri','docs/RI/RI-001.md','draft')"
+    )
+    br = await _make_br(pool, demand)
+    payload_model = spec_payload()
+    payload_model["edges"].append(
+        {"parentFeature": "login-tests", "childFeature": "RI-001", "type": "tests"}
+    )
+    status, payload = await generation.handle_generate_specs(
+        pool, br["id"], client=FakeClient(payload_model)
+    )
+    assert status == 200
+    assert not [edge for edge in payload["spec_edges"] if edge["type"] == "tests"]
+    rows = await pool.fetch("SELECT parent_id, child_id, type FROM spec_edges WHERE type = 'tests'")
+    assert rows == []
+    events = await pool.fetch("SELECT payload FROM events WHERE type = 'spec_edge_unresolved'")
+    assert events == []
+    # O resto do grafo do lote continua resolvido.
+    assert {"parent_id": "SPEC-002", "child_id": "SPEC-001", "type": "depends_on"} in payload[
+        "spec_edges"
+    ]
+
+
 async def test_every_ac_covered_by_some_spec(pool, demand) -> None:
     """Toda AC da BR aparece no CORPO de alguma SPEC (Contrato Comum §8.4 D7)."""
     br = await _make_br(pool, demand)

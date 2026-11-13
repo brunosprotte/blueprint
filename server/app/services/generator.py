@@ -357,8 +357,8 @@ O corpo Markdown de cada SPEC deve conter, nesta ordem, as 14 seções: Objetivo
 Responsabilidade, Entradas, Saídas, Fluxo principal, Fluxos alternativos, Validações, Failures,
 Pré-condições, Pós-condições, Acceptance Criteria atendidos, Dependências e Blueprint Documents
 necessários.
-As arestas do grafo usam o feature da SPEC dentro deste lote como identificador. Em "tests", a
-SPEC de testes é o parent e a SPEC testada é o child.
+As arestas do grafo usam o feature da SPEC dentro deste lote como identificador. Use apenas
+"depends_on" e "derives_from": a aresta "tests" nasce do arquivo RI e é criada pelo sync.
 Responda somente com o JSON do schema fornecido."""
 
 
@@ -1165,6 +1165,10 @@ async def _resolve_spec_edges(
 
     Direção canônica (Contrato Comum §8.4 D4): `depends_on` tem parent = a SPEC
     que depende, child = a dependência.
+
+    A aresta `tests` é **ignorada em silêncio** (§8.4 D3): ela nasce do arquivo RI
+    (o frontmatter do RI lista as SPECs que ele testa) e o F4 a cria no `sync`.
+    O gerador não a resolve e não emite `spec_edge_unresolved` por ela.
     """
     resolved: list[tuple[str, str, str]] = []
     unresolved: list[dict[str, str]] = []
@@ -1173,6 +1177,8 @@ async def _resolve_spec_edges(
         edge_type = str(edge.get("type") or "")
         if edge_type == "derives_from":
             continue  # criada pelo servidor para toda SPEC
+        if edge_type == "tests":
+            continue  # nasce do RI (Contrato Comum §8.4 D3) — silêncio, sem evento
         parent_feature = str(edge.get("parentFeature") or "")
         child_feature = str(edge.get("childFeature") or "")
         parent_id = feature_to_id.get(parent_feature)
