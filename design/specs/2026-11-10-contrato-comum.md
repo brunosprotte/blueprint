@@ -492,6 +492,21 @@ O `sync` atualiza o que é derivado do conteúdo (`sha`, `status`/promoção) e
 servidor gerou, o `sync` marca `changed` e re-linta — a origem da verdade dos
 IDs continua sendo o servidor.
 
+**D9 — índice único de `chunks` (resolvido 2026-11-13).**
+A spec F7 previa índice único em `(corpus_id, source_kind, source_ref)`. Isso
+quebra: **um `source_ref` gera VÁRIOS chunks** (uma por seção H2/H3) e o método
+tem seções homônimas (META-006 tem duas `## BR`). O índice real é
+`(corpus_id, source_kind, source_ref, heading, md5(text))`. A idempotência
+permanece no `DELETE ... WHERE corpus_id = ? AND source_ref = ?`, que é o que o
+§8.1 manda.
+
+**D10 — o enum de arestas do SPEC mantém `tests`, mas o gerador ignora.**
+O `SPEC_SCHEMA` do F5 continua aceitando `tests` no enum (o modelo pode
+propor), e o `_resolve_spec_edges` **ignora em silêncio** aresta `tests` — sem
+criar aresta e sem evento `spec_edge_unresolved`. O `SPEC_SYSTEM_PROMPT` pede
+apenas `depends_on` e `derives_from`. A aresta `tests` nasce do arquivo RI, no
+sync do F4.
+
 ## 9. Dependências e ondas de paralelismo
 
 ```
