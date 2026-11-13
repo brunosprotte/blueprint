@@ -266,6 +266,52 @@ async def test_sync_ignores_non_artifact_paths(pool):
 
 
 @pytest.mark.asyncio
+async def test_sync_preserves_allocated_frontmatter(pool):
+    """O sync não reescreve o frontmatter alocado pelo servidor (D5).
+
+    O servidor preserva `id`, `status`, `createdFrom`, `doubtsIndex`,
+    `dependsOn` e `timestamp`; do repo vem o resto e o corpo — a origem da
+    verdade dos IDs continua sendo o servidor.
+
+    O arquivo editado pelo repo marca `changed` (o artefato já promovido); em
+    `draft` a divergência é 409 `content_diverged` (spec §5.6, D3 do 8.4).
+    """
+    await _sync(pool, [{"path": BR_PATH, "content": BR_VALID}])
+    await _sync(pool, [{"path": BR_PATH, "content": BR_VALID}])
+
+    status = await pool.fetchval("SELECT status FROM artifacts WHERE id = 'BR-001'")
+    assert status == "pending"
+
+    edited = (
+        BR_VALID.replace("id: BR-001", "id: BR-777")
+        .replace(
+            "doubtsIndex: docs/implementation-artifacts/duvidas-br/BR-001.md",
+            "doubtsIndex: docs/implementation-artifacts/duvidas-br/BR-777.md",
+        )
+        .replace('timestamp: "2026-11-10T00:00:00Z"', 'timestamp: "2026-12-31T00:00:00Z"')
+        .replace(
+            "description: Regras de negócio para autenticação de usuário com e-mail e senha.",
+            "description: Texto novo do repo.",
+        )
+    )
+    result = await _sync(pool, [{"path": BR_PATH, "content": edited}])
+    assert result["summary"]["changed"] == 1
+
+    row = await pool.fetchrow(
+        "SELECT id, content, doubts_index FROM artifacts WHERE path = $1", BR_PATH
+    )
+    assert row["id"] == "BR-001"
+    assert row["doubts_index"] == "docs/implementation-artifacts/duvidas-br/BR-001.md"
+
+    frontmatter, _ = artifacts_service.parse_frontmatter(row["content"])
+    assert frontmatter["id"] == "BR-001"
+    assert frontmatter["doubtsIndex"] == "docs/implementation-artifacts/duvidas-br/BR-001.md"
+    assert frontmatter["timestamp"] == "2026-11-10T00:00:00Z"
+    # O que não é alocado vem do repo.
+    assert frontmatter["description"] == "Texto novo do repo."
+
+
+@pytest.mark.asyncio
 async def test_sync_status_source_is_db(pool):
     """Frontmatter com `status` diferente não muda `artifacts.status` (spec §5.7)."""
     content = BR_VALID.replace("status: draft", "status: stable")

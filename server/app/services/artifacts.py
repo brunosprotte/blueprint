@@ -7,6 +7,7 @@ O banco é a autoridade do **status**; o repo de dev é a autoridade do
 from __future__ import annotations
 
 import hashlib
+import importlib
 import re
 from pathlib import Path, PurePosixPath
 
@@ -299,18 +300,59 @@ async def _next_artifact_id(conn, kind: str) -> str:
     return f"{prefix}-{int(row['next']):03d}"
 
 
-def _f6_doubts_function(name: str):
-    """Função do serviço de dúvidas do F6 — `None` enquanto o F6 não existir."""
+def _optional_function(module_name: str, name: str):
+    """Função de outro módulo (F5/F6) — `None` enquanto a fase não existir."""
     try:
-        from app.services import doubts as doubts_service
+        module = importlib.import_module(module_name)
     except ImportError:
         return None
-    return getattr(doubts_service, name, None)
+    return getattr(module, name, None)
+
+
+#: Campos do frontmatter que o servidor aloca — o sync os preserva
+#: (Contrato Comum §8.4 D5): a origem da verdade dos IDs é o servidor.
+_ALLOCATED_FIELDS = ("status", "createdFrom", "dependsOn", "timestamp")
+
+
+def _merge_frontmatter(
+    allocated: dict,
+    incoming: dict,
+    *,
+    artifact_id: str,
+    doubts_index: str | None,
+) -> dict:
+    """Frontmatter final: preserva o que o servidor alocou, adota o resto do repo.
+
+    O sync **não** reescreve o frontmatter do servidor (Contrato Comum §8.4 D5):
+    `id` e `doubtsIndex` são sempre os do servidor; `status`, `createdFrom`,
+    `dependsOn` e `timestamp` são os alocados; o resto (title, description,
+    tags, module, feature, version...) vem do repo, que é a fonte do conteúdo.
+    """
+    merged = dict(incoming)
+    for field in _ALLOCATED_FIELDS:
+        value = allocated.get(field)
+        if value not in (None, "", []):
+            merged[field] = value
+    merged["id"] = artifact_id
+    if doubts_index:
+        merged["doubtsIndex"] = doubts_index
+    return merged
+
+
+def _render_document(frontmatter: dict, body: str) -> str:
+    """Markdown do artefato: frontmatter mesclado + corpo. O render do F5 quando existe."""
+    render = _optional_function("app.services.generator", "render_document")
+    if render is not None:
+        return render(frontmatter, body)
+    dumped = yaml.safe_dump(
+        frontmatter, allow_unicode=True, sort_keys=False, default_flow_style=False
+    ).rstrip()
+    return f"---\n{dumped}\n---\n\n{body.strip()}\n"
 
 
 def doubts_index_path(kind: str, artifact_id: str) -> str:
     """Caminho do arquivo de dúvidas do artefato (convenção do F6/META-005)."""
-    path_fn = _f6_doubts_function("doubts_file_path")
+    path_fn = _optional_function("app.services.doubts", "doubts_file_path")
     if path_fn is not None:
         return path_fn(artifact_id, kind)
     folder = DOUBTS_DIR.get(kind, "duvidas-spec")
@@ -323,7 +365,7 @@ def render_doubts_file(artifact_id: str, status: str) -> str | None:
     Import tardio: sem o F6, **nenhum** arquivo é escrito — nunca um arquivo em
     formato errado (Contrato Comum §8.4 D2).
     """
-    render = _f6_doubts_function("render_doubts_file")
+    render = _optional_function("app.services.doubts", "render_doubts_file")
     if render is None:
         return None
     return render(artifact_id, [], status)
@@ -541,7 +583,14 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                 kind = item["kind"]
                 frontmatter = item["frontmatter"]
 
-                row, created = await _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
+                (
+                    row,
+                    created,
+                    final_sha,
+                    final_content,
+                ) = await _upsert_artifact(
+                    conn, repo_id, path, content, sha, kind, frontmatter
+                )
 
                 artifact_id = row["id"]
                 status = row["status"]
@@ -552,44 +601,44 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                     findings_by_path.get(path, []), available=universe is not None
                 )
 
-                if not created:
+                if not created and final_sha != row["sha"]:
+                    # O repo divergiu do que o servidor tem.
                     if status == "draft":
-                        if row["sha"] == sha:
-                            if lint_result["available"] and lint_result["error"] == 0:
-                                await apply_artifact_transition(
-                                    conn,
-                                    artifact_id,
-                                    "pending",
-                                    actor_id=actor_id,
-                                    event_type="artifact.promoted",
-                                )
-                                promoted = True
-                                status = "pending"
-                        else:
-                            raise ApiError(
-                                "content_diverged",
-                                "conteúdo divergente do servidor",
-                                409,
-                                {
-                                    "path": path,
-                                    "server_sha": row["sha"],
-                                    "client_sha": sha,
-                                    "server_status": row["status"],
-                                },
-                            )
-                    elif row["sha"] != sha or (row["content"] or "") != content:
-                        # O repo é autoritativo para o **conteúdo**; o status é do banco.
-                        await conn.execute(
-                            """
-                            UPDATE artifacts
-                               SET content = $2, sha = $3, updated_at = now()
-                             WHERE id = $1
-                            """,
-                            artifact_id,
-                            content,
-                            sha,
+                        raise ApiError(
+                            "content_diverged",
+                            "conteúdo divergente do servidor",
+                            409,
+                            {
+                                "path": path,
+                                "server_sha": row["sha"],
+                                "client_sha": sha,
+                                "server_status": row["status"],
+                            },
                         )
-                        changed = True
+                    # O repo é autoritativo para o **conteúdo**; o status é do banco.
+                    await conn.execute(
+                        """
+                        UPDATE artifacts
+                           SET content = $2, sha = $3, updated_at = now()
+                         WHERE id = $1
+                        """,
+                        artifact_id,
+                        final_content,
+                        final_sha,
+                    )
+                    changed = True
+                elif not created and status == "draft":
+                    # Mesmo conteúdo (após o merge): o artefato está no repo.
+                    if lint_result["available"] and lint_result["error"] == 0:
+                        await apply_artifact_transition(
+                            conn,
+                            artifact_id,
+                            "pending",
+                            actor_id=actor_id,
+                            event_type="artifact.promoted",
+                        )
+                        promoted = True
+                        status = "pending"
 
                 pending_edges.append((artifact_id, kind, frontmatter))
 
@@ -613,7 +662,7 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                     payload = {
                         "path": path,
                         "id": artifact_id,
-                        "sha": sha,
+                        "sha": final_sha,
                         "status": status,
                         "promoted": promoted,
                         "changed": changed,
@@ -638,7 +687,7 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                         "created": created,
                         "promoted": promoted,
                         "changed": changed,
-                        "sha": sha,
+                        "sha": final_sha,
                         "lint": {"error": lint_result["error"], "warning": lint_result["warning"]},
                     }
                 )
@@ -653,7 +702,12 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
 
 
 async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter):
-    """Lê (ou cria) a linha do artefato. Devolve `(row, created)`."""
+    """Lê (ou cria) a linha do artefato.
+
+    Devolve `(row, created, final_sha, final_content)`: o frontmatter guardado é
+    o **mesclado** — o servidor preserva o que alocou e adota o resto do repo
+    (Contrato Comum §8.4 D5).
+    """
     row = await conn.fetchrow(
         """
         SELECT * FROM artifacts
@@ -664,7 +718,16 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
         path,
     )
     if row is not None:
-        return row, False
+        allocated, _ = parse_frontmatter(row["content"] or "")
+        merged = _merge_frontmatter(
+            allocated,
+            frontmatter,
+            artifact_id=row["id"],
+            doubts_index=row["doubts_index"],
+        )
+        _, body = parse_frontmatter(content)
+        final_content = _render_document(merged, body)
+        return row, False, sha256(final_content), final_content
 
     artifact_id = _id_from_frontmatter(frontmatter)
     if artifact_id is not None:
@@ -681,6 +744,13 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
     doubts_index = doubts_index_path(kind, artifact_id)
     doubts_content = render_doubts_file(artifact_id, "draft")
 
+    merged = _merge_frontmatter(
+        {}, frontmatter, artifact_id=artifact_id, doubts_index=doubts_index
+    )
+    _, body = parse_frontmatter(content)
+    final_content = _render_document(merged, body)
+    final_sha = sha256(final_content)
+
     inserted = await conn.fetchrow(
         """
         INSERT INTO artifacts
@@ -696,14 +766,14 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
         module,
         feature,
         path,
-        sha,
+        final_sha,
         version,
-        content,
+        final_content,
         doubts_index,
         doubts_content,
     )
     if inserted is not None:
-        return inserted, True
+        return inserted, True, final_sha, final_content
 
     # Outro sync criou a linha no meantime — serializa e lê a versão existente.
     row = await conn.fetchrow(
@@ -717,7 +787,16 @@ async def _upsert_artifact(conn, repo_id, path, content, sha, kind, frontmatter)
     )
     if row is None:
         raise ApiError("sync_conflict", "artefato criado por outro sync", 409, {"path": path})
-    return row, False
+    allocated, _ = parse_frontmatter(row["content"] or "")
+    merged = _merge_frontmatter(
+        allocated,
+        frontmatter,
+        artifact_id=row["id"],
+        doubts_index=row["doubts_index"],
+    )
+    _, body = parse_frontmatter(content)
+    final_content = _render_document(merged, body)
+    return row, False, sha256(final_content), final_content
 
 
 def _id_from_frontmatter(frontmatter: dict) -> str | None:
