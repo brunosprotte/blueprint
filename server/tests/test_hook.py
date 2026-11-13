@@ -945,11 +945,48 @@ def test_reviewer_prompt_carries_spec_and_diff(
 
 
 # --------------------------------------------------------------------------- #
-# Requisito sobre o kit do F8 (ainda nao existe neste worktree)
+# Contrato com o kit do F8: `sdd.py review` delega ao reviewer da F9
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.skip(reason="F8 pendente")
-def test_kit_review_delegates_to_reviewer() -> None:
-    kit = REPO_ROOT / "plugin" / "kit" / "sdd.py"
-    assert kit.is_file()
-    assert "reviewer" in kit.read_text(encoding="utf-8")
+def test_kit_review_delegates_to_reviewer(
+    git_repo: SimpleNamespace, api_server: Any, claude_bin: Path
+) -> None:
+    """O kit real do F8 roda o reviewer real da F9 (nada de dummies)."""
+    kit = git_repo.root / "kit"
+    kit.mkdir()
+    shutil.copy(REPO_ROOT / "plugin" / "kit" / "sdd.py", kit / "sdd.py")
+    shutil.copy(REVIEWER_SOURCE, kit / "reviewer.py")
+    (kit / "state.json").write_text(
+        json.dumps({"demand_id": DEMAND_ID, "repo": "acme/repo"}), encoding="utf-8"
+    )
+
+    findings = [
+        {
+            "severity": "suggestion",
+            "title": "achado do reviewer",
+            "detail": "detalhe",
+            "ac": "AC-001",
+            "suggestion": "ajuste",
+        }
+    ]
+    env = _base_env(_path_for(claude_bin))
+    env["SDD_URL"] = _api_url(api_server)
+    env["SDD_TOKEN"] = TOKEN
+    env["SDD_TEST_CLAUDE_RESULT"] = json.dumps(findings)
+
+    proc = subprocess.run(
+        [sys.executable, str(kit / "sdd.py").replace("\\", "/"), "review"],
+        cwd=str(git_repo.root),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["verdict"] == "suggestions"
+    assert payload["findings"][0]["title"] == "achado do reviewer"
+    reviews = [r for r in api_server.requests if r["path"] == "/api/reviews"]
+    assert len(reviews) == 1
+    assert reviews[0]["body"]["verdict"] == "suggestions"
+    assert reviews[0]["body"]["findings"][0]["title"] == "achado do reviewer"
