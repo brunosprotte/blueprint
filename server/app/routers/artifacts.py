@@ -17,7 +17,6 @@ from app.services.lifecycle import (
     ApiError,
     api_route,
     assert_repo_allowed,
-    parse_uuid,
 )
 
 router = APIRouter()
