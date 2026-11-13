@@ -258,6 +258,24 @@ async def test_index_method_uses_f3_method_index(pool):
     assert {row["source_ref"] for row in rows} == expected
 
 
+async def test_index_method_excludes_implementation_artifacts(pool):
+    """O catálogo de dúvidas não é conhecimento do método (META-006 §9).
+
+    A lista de diretórios excluídos é a do F3 (`MethodIndex.EXCLUDED_DIRS`) — o
+    F7 não mantém uma lista própria.
+    """
+    await index_method()
+    total = await pool.fetchval(
+        "SELECT count(*) FROM chunks WHERE corpus_id = 'method' AND source_ref <> ''"
+    )
+    assert total > 0
+    rows = await pool.fetch(
+        "SELECT DISTINCT source_ref FROM chunks "
+        "WHERE corpus_id = 'method' AND source_ref LIKE '%implementation-artifacts%'"
+    )
+    assert rows == []
+
+
 async def test_tsv_trigger_maintains_tsv(pool):
     corpus = "repo:test-tsv"
     await _insert_chunk(pool, corpus, "Alpha", "alpha beta", "ref-alpha")
