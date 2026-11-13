@@ -129,7 +129,7 @@ LINT_BEHAVIOUR: dict = {"findings": ()}
 
 
 def install_lint_double() -> None:
-    """Double do linter do F2 — os findings saem de `LINT_BEHAVIOUR`."""
+    """Double do linter do F2 — os findings saem de `runner.LINT_BEHAVIOUR`."""
     if getattr(sys.modules.get("app.lint.runner"), "_f4_double", False):
         return
 
@@ -191,7 +191,7 @@ def install_lint_double() -> None:
             return None
 
     def lint_document(doc, universe):
-        findings = LINT_BEHAVIOUR["findings"]
+        findings = runner.LINT_BEHAVIOUR["findings"]
         return list(findings(doc) if callable(findings) else findings)
 
     runner.Finding = Finding
@@ -200,6 +200,7 @@ def install_lint_double() -> None:
     runner.SyncedArtifacts = SyncedArtifacts
     runner.CompositeUniverse = CompositeUniverse
     runner.lint_document = lint_document
+    runner.LINT_BEHAVIOUR = LINT_BEHAVIOUR
     lint_pkg.runner = runner
     sys.modules["app.lint"] = lint_pkg
     sys.modules["app.lint.runner"] = runner
