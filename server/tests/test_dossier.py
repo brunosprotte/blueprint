@@ -1,21 +1,14 @@
 """Testes da fase F7 — dossiê da demanda.
 
-Dependem do F1 (banco) e da migration 004 do F4 (`commits.status`); marcados com
-`@pytest.mark.skip(reason="F1 pendente")` enquanto essas fases não existem.
+Rodam contra o core real (F1: banco + app ASGI) e a migration 004 do F4
+(`commits.status`). Sem dummies: os dados são gravados direto no banco.
 """
 from __future__ import annotations
 
 import json
-import sys
 import uuid
-from pathlib import Path
 
-import pytest
-
-# `server/` no sys.path para `app.*` ser importável enquanto o F1 não existe.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from app.services.retriever import build_dossier  # noqa: E402
+from app.services.retriever import build_dossier
 
 BR_CONTENT = """---
 id: BR-013
@@ -119,8 +112,8 @@ async def _seed(pool) -> dict:
 
     commit_1 = uuid.uuid4()
     await pool.execute(
-        "INSERT INTO commits (id, demand_id, repo_id, sha, message, branch, author, files) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)",
+        "INSERT INTO commits (id, demand_id, repo_id, sha, message, branch, author, files, "
+        "created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now() - interval '2 min')",
         commit_1,
         demand_id,
         repo_id,
@@ -133,8 +126,9 @@ async def _seed(pool) -> dict:
 
     commit_2 = uuid.uuid4()
     await pool.execute(
-        "INSERT INTO commits (id, demand_id, repo_id, sha, message, branch, author, files, status) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)",
+        "INSERT INTO commits (id, demand_id, repo_id, sha, message, branch, author, files, "
+        "status, created_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, now() - interval '1 min')",
         commit_2,
         demand_id,
         repo_id,
@@ -147,8 +141,8 @@ async def _seed(pool) -> dict:
     )
 
     await pool.execute(
-        "INSERT INTO reviews (id, commit_id, demand_id, verdict, findings) "
-        "VALUES ($1, $2, $3, $4, $5::jsonb)",
+        "INSERT INTO reviews (id, commit_id, demand_id, verdict, findings, created_at) "
+        "VALUES ($1, $2, $3, $4, $5::jsonb, now() - interval '2 min')",
         uuid.uuid4(),
         commit_1,
         demand_id,
@@ -156,8 +150,8 @@ async def _seed(pool) -> dict:
         json.dumps([]),
     )
     await pool.execute(
-        "INSERT INTO reviews (id, commit_id, demand_id, verdict, findings) "
-        "VALUES ($1, $2, $3, $4, $5::jsonb)",
+        "INSERT INTO reviews (id, commit_id, demand_id, verdict, findings, created_at) "
+        "VALUES ($1, $2, $3, $4, $5::jsonb, now() - interval '1 min')",
         uuid.uuid4(),
         commit_1,
         demand_id,
@@ -170,7 +164,14 @@ async def _seed(pool) -> dict:
                     "detail": "Mensagem revela se o e-mail existe",
                     "ac": "AC-002",
                     "suggestion": "Mensagem generica",
-                }
+                },
+                {
+                    "severity": "blocking",
+                    "title": "Digitais",
+                    "detail": "Detalhe ja tratado em revisao anterior",
+                    "ac": "AC-001",
+                    "suggestion": "Nada a fazer",
+                },
             ]
         ),
     )
@@ -197,8 +198,6 @@ async def _seed(pool) -> dict:
     return {"demand_id": demand_id, "commit_1": commit_1, "commit_2": commit_2}
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_shape(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -210,8 +209,6 @@ async def test_dossier_shape(pool):
     assert isinstance(dossier["desvios"], list)
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_necessidade(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -228,8 +225,6 @@ async def test_dossier_necessidade(pool):
     assert acs[0]["title"] == "Aluno entra com e-mail e senha"
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_ac_coverage(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -241,8 +236,6 @@ async def test_dossier_ac_coverage(pool):
     assert acs["AC-001"]["commits"] == [SHA_1[:7]]
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_proposta_grafo(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -256,8 +249,6 @@ async def test_dossier_proposta_grafo(pool):
     ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_implementacao(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -275,8 +266,6 @@ async def test_dossier_implementacao(pool):
     assert reviews[0]["findings"] == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_excludes_orphaned(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -286,8 +275,6 @@ async def test_dossier_excludes_orphaned(pool):
     assert SHA_1 in shas
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_desvio_ac_sem_spec(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -299,8 +286,6 @@ async def test_dossier_desvio_ac_sem_spec(pool):
     assert desvios[0]["detail"]
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_desvio_ac_sem_commit(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -311,8 +296,6 @@ async def test_dossier_desvio_ac_sem_commit(pool):
     assert desvios[0]["specs"] == ["SPEC-003"]
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_desvio_finding_bloqueante(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -327,8 +310,6 @@ async def test_dossier_desvio_finding_bloqueante(pool):
     assert desvios[0]["suggestion"]
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_dossier_finding_tratado(pool):
     seeded = await _seed(pool)
     dossier = await build_dossier(pool, seeded["demand_id"])
@@ -339,8 +320,17 @@ async def test_dossier_finding_tratado(pool):
     assert bloqueantes == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
+async def test_dossier_route_shape(client, auth_token, pool):
+    seeded = await _seed(pool)
+    response = await client.get(
+        f"/api/knowledge/dossier/{seeded['demand_id']}",
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"necessidade", "proposta", "implementacao", "desvios"}
+
+
 async def test_dossier_unknown_demand(client, auth_token):
     response = await client.get(
         f"/api/knowledge/dossier/{uuid.uuid4()}",

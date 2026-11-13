@@ -1,25 +1,28 @@
 """Testes da fase F7 — chunking, BM25 de duas etapas e busca.
 
-Os testes que dependem do F1 (banco, rotas) estão marcados com
-`@pytest.mark.skip(reason="F1 pendente")` até a fase existir neste worktree.
+Rodam contra o core real: banco e app ASGI (F1), linter (F2) e corpus do método
+(F3, `app.services.method.MethodIndex`). Nada de dummies.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import math
-import sys
 import uuid
 from pathlib import Path
 
 import pytest
 
-# `server/` no sys.path para `app.*` ser importável enquanto o F1 (dono de
-# `server/tests/__init__.py` e do `pyproject.toml`) não existe neste worktree.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from app.services.indexer import chunk_markdown, source_kind_for, tokenize  # noqa: E402
-from app.services.retriever import Candidate, bm25_rank  # noqa: E402
+from app.lint.runner import parse_document
+from app.services.indexer import (
+    chunk_markdown,
+    index_artifact,
+    index_method,
+    source_kind_for,
+    tokenize,
+)
+from app.services.method import MethodIndex
+from app.services.retriever import Candidate, bm25_rank, search
 
 GOLD_SET = Path(__file__).parent / "gold_set.json"
 
@@ -133,14 +136,10 @@ def test_bm25_drops_zero_score():
     assert bm25_rank(candidates, ["gamma"]) == []
 
 
-# --- busca (depende do F1) -------------------------------------------------
+# --- busca (core real) -----------------------------------------------------
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_search_two_stage(pool):
-    from app.services.retriever import search
-
     corpus = "repo:test-two-stage"
     await _insert_chunk(pool, corpus, "Alpha", "alpha alpha beta", "ref-alpha")
     await _insert_chunk(pool, corpus, "Beta", "beta gamma", "ref-beta")
@@ -158,11 +157,7 @@ async def test_search_two_stage(pool):
     assert hits[0].score != rank_cd
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_search_never_crosses_corpora(pool):
-    from app.services.retriever import search
-
     await _insert_chunk(pool, "repo:repo-a", "A chunk", "shared term alpha", "ref-a")
     await _insert_chunk(pool, "repo:repo-b", "B chunk", "shared term alpha", "ref-b")
 
@@ -172,11 +167,7 @@ async def test_search_never_crosses_corpora(pool):
     assert "B chunk" not in [hit.heading for hit in hits]
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_search_caps_top(pool, client, auth_token):
-    from app.services.retriever import search
-
     corpus = "repo:test-caps-top"
     for i in range(5):
         await _insert_chunk(pool, corpus, f"Chunk {i}", "alpha beta gamma", f"ref-{i}")
@@ -192,29 +183,20 @@ async def test_search_caps_top(pool, client, auth_token):
     assert response.status_code == 422
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_search_empty_result(pool):
-    from app.services.retriever import search
-
     await _insert_chunk(pool, "repo:test-empty", "Alpha", "alpha beta", "ref-alpha")
     hits = await search("palavrainexistente", "repo:test-empty", top=5)
     assert hits == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_index_artifact_idempotent(pool):
-    from app.services.indexer import index_artifact
-
     repo_id = uuid.uuid4()
     await pool.execute(
         "INSERT INTO repos (id, owner, name) VALUES ($1, $2, $3)", repo_id, "acme", "app"
     )
     content = "---\nid: SPEC-002\ntitle: Login API\n---\n\n## Section\n\nbody\n"
     await pool.execute(
-        "INSERT INTO artifacts (id, repo_id, kind, path, content) "
-        "VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO artifacts (id, repo_id, kind, path, content) VALUES ($1, $2, $3, $4, $5)",
         "SPEC-002",
         repo_id,
         "spec",
@@ -222,28 +204,19 @@ async def test_index_artifact_idempotent(pool):
         content,
     )
 
-    class _Doc:
-        path = "docs/SPEC/login/login-api.md"
-        kind = "spec"
-        frontmatter = {"id": "SPEC-002", "title": "Login API"}
-
-    _Doc.repo_id = str(repo_id)
-    _Doc.content = content
+    doc = parse_document("docs/SPEC/login/login-api.md", content, repo_id=str(repo_id))
+    assert doc.kind == "spec"
 
     corpus = f"repo:{repo_id}"
-    first = await index_artifact(_Doc(), corpus)
-    second = await index_artifact(_Doc(), corpus)
+    first = await index_artifact(doc, corpus)
+    second = await index_artifact(doc, corpus)
 
     assert first == second > 0
     count = await pool.fetchval("SELECT count(*) FROM chunks WHERE corpus_id = $1", corpus)
     assert count == first
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_index_method_idempotent(pool):
-    from app.services.indexer import index_method
-
     first = await index_method()
     assert first > 0
 
@@ -267,8 +240,24 @@ async def test_index_method_idempotent(pool):
     assert int(payload["chunk_count"]) == count_after
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
+async def test_index_method_uses_f3_method_index(pool):
+    """D1 — o corpus indexado é o do F3, não uma varredura própria do F7."""
+    from app.config import settings
+
+    index = MethodIndex(Path(settings.repo_root))
+    expected = {
+        doc.path[len("docs/") :] if doc.path.startswith("docs/") else doc.path
+        for doc in index.all()
+    }
+    assert expected
+
+    await index_method()
+    rows = await pool.fetch(
+        "SELECT DISTINCT source_ref FROM chunks WHERE corpus_id = 'method' AND source_ref <> ''"
+    )
+    assert {row["source_ref"] for row in rows} == expected
+
+
 async def test_tsv_trigger_maintains_tsv(pool):
     corpus = "repo:test-tsv"
     await _insert_chunk(pool, corpus, "Alpha", "alpha beta", "ref-alpha")
@@ -280,12 +269,47 @@ async def test_tsv_trigger_maintains_tsv(pool):
         "UPDATE chunks SET text = 'gamma delta' WHERE corpus_id = $1", corpus
     )
     updated = await pool.fetchval("SELECT tsv::text FROM chunks WHERE corpus_id = $1", corpus)
-    assert "gamma" in updated
-    assert "alpha" not in updated
+    expected = await pool.fetchval(
+        "SELECT to_tsvector('portuguese', coalesce($1, '') || ' ' || coalesce($2, ''))::text",
+        "Alpha",
+        "gamma delta",
+    )
+    assert updated == expected
+    assert "beta" not in updated
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
+async def test_tsv_uses_f3_expression(pool):
+    """Contrato Comum §4.1 — o trigger do F7 usa a mesma expressão do INSERT do F3."""
+    corpus = "repo:test-tsv-expression"
+    heading = "Titulo da secao"
+    text = "corpo do texto com acento"
+    await _insert_chunk(pool, corpus, heading, text, "ref-expression")
+
+    actual = await pool.fetchval("SELECT tsv FROM chunks WHERE corpus_id = $1", corpus)
+    expected = await pool.fetchval(
+        "SELECT to_tsvector('portuguese', coalesce($1, '') || ' ' || coalesce($2, ''))",
+        heading,
+        text,
+    )
+    assert actual == expected
+
+
+async def test_commits_status_is_owned_by_f4(pool):
+    """Contrato Comum §4.3 — `commits.status` é do F4; o F7 só consome."""
+    default = await pool.fetchval(
+        "SELECT column_default FROM information_schema.columns "
+        "WHERE table_name = 'commits' AND column_name = 'status'"
+    )
+    assert default is not None and "present" in default
+
+    constraint = await pool.fetchval(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'commits_status_check'"
+    )
+    assert constraint is not None
+    assert "present" in constraint and "orphaned" in constraint
+    assert "reported" not in constraint
+
+
 async def test_source_ref_unique(pool):
     """Chunk idêntico (mesma origem, mesmo heading, mesmo corpo) viola a unicidade.
 
@@ -298,8 +322,6 @@ async def test_source_ref_unique(pool):
         await _insert_chunk(pool, corpus, "Alpha", "alpha beta", "ref-same")
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F3 pendente")
 async def test_response_shape_same_as_method_search(client, auth_token):
     headers = {"Authorization": f"Bearer {auth_token}"}
     knowledge = await client.get("/api/knowledge", params={"q": "knowledge"}, headers=headers)
@@ -319,28 +341,25 @@ async def test_response_shape_same_as_method_search(client, auth_token):
         }
 
     method = await client.get("/api/method/search", params={"q": "knowledge"}, headers=headers)
-    if method.status_code == 200:
-        assert set(method.json()) == set(body)
-        if method.json()["hits"]:
-            assert set(method.json()["hits"][0]) == set(body["hits"][0])
+    assert method.status_code == 200
+    assert set(method.json()) == set(body)
+    if method.json()["hits"]:
+        assert set(method.json()["hits"][0]) == set(body["hits"][0])
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="F1 pendente")
 async def test_gold_recall(pool):
-    from app.services.retriever import search
-
     cases = json.loads(GOLD_SET.read_text(encoding="utf-8"))["cases"]
     assert len(cases) == 20
+
+    await index_method()
+    rows = await pool.fetch(
+        "SELECT id, source_ref, heading FROM chunks WHERE corpus_id = 'method'"
+    )
+    by_id = {str(row["id"]): (row["source_ref"], row["heading"]) for row in rows}
 
     acertos = 0
     for case in cases:
         hits = await search(case["q"], case["corpus_id"], top=5)
-        rows = await pool.fetch(
-            "SELECT id, source_ref, heading FROM chunks WHERE corpus_id = $1",
-            case["corpus_id"],
-        )
-        by_id = {str(row["id"]): (row["source_ref"], row["heading"]) for row in rows}
         if any(
             by_id.get(hit.chunk_id) == (case["expect_ref"], case["expect_heading"])
             for hit in hits
