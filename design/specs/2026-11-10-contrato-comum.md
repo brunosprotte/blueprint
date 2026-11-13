@@ -419,15 +419,25 @@ merge das 10 fases. **Vinculantes.**
 
 **D1 — o arquivo de duvidas (sidecar) nunca vira linha de `artifacts`.**
 `classify_path` continua mapeando só `docs/BR|SPEC|RI/**`; o sidecar em
-`docs/implementation-artifacts/duvidas-*/**` fica fora da tabela. O que muda é
-o **universo do linter**: no `sync`, o universo é montado sobre o **repo do dev**
-(o repo que está sendo sincronizado), não sobre o repo blueprint.
-`MethodCorpus(repo_path)` já varre `repo_path/docs` e indexa o sidecar com path
-relativo `docs/implementation-artifacts/...` — exatamente o formato do
-`doubtsIndex` que o PATH-002 resolve. Correção no F4: `build_universe` passa a
-receber o path do repo e usa `MethodCorpus(repo_path)` (**não**
-`MethodCorpus(repo_path / "docs")`, que produzia corpus vazio por `docs/docs`).
-A tabela `doubts` (linhas de pergunta) continua intocada pelo F4.
+`docs/implementation-artifacts/duvidas-*/**` fica fora da tabela.
+
+O PATH-002 resolve o `doubtsIndex` contra o universo do linter, e o sidecar
+precisa aparecer lá. **O servidor NUNCA lê o filesystem do repo de dev**
+(invariante: o servidor não clona nem lê o repo de dev — o repo é fonte de
+conteúdo via `sync`, não via filesystem). Logo o sidecar vem do **banco**, que
+já o tem: a migration 003 do F4 cria `artifacts.doubts_index` (o path) e
+`artifacts.doubts_content` (o conteúdo).
+
+Correção no F4:
+- `build_universe` monta o universo com o `MethodCorpus` do **repo blueprint**
+  (que o servidor tem — resolve META/PAT/TP), o `SyncedArtifacts` (artefatos
+  sincronizados) e uma parte de universo **do próprio F4** que expõe o path de
+  `artifacts.doubts_index` como existente. Sem mexer no F2 (dono de
+  `app/lint/runner.py`) — o `CompositeUniverse` aceita N partes.
+- `build_universe` **não** recebe `repo_path`.
+- No `pull`, o F4 lê o evento `events.payload` type `doubts_file_rendered`
+  (path + content + sha) e escreve o arquivo de duvidas no repo de dev.
+- A tabela `doubts` (linhas de pergunta) continua intocada pelo F4.
 
 **D2 — formato do arquivo de duvidas: canônico v1, em todo lugar.**
 O F4 **não** renderiza mais o próprio template. Ele chama o renderizador do F6
@@ -446,6 +456,9 @@ passa de 15 para **16 campos** (SK-002 §15 + `complexity` + `dependsOn`).
 (o frontmatter do RI lista as SPECs que ele testa) e o F4 a cria no `sync`.
 Consequência: SPEC-004 (ciclo) e o `stabilize` (que exige aresta `tests` para
 um RI) passam a ter dado no frontmatter do repo.
+
+Se o modelo proposer uma aresta `tests` apontando para um RI, o F5 **ignora em
+silêncio** — não tenta resolver e não emite `spec_edge_unresolved`.
 
 **D4 — direção das arestas (canônico).**
 `spec_edges(parent_id, child_id, type)`:
@@ -471,6 +484,13 @@ As ACs ficam na seção "Acceptance Criteria" do corpo da SPEC (16 campos de
 frontmatter, sem `acceptanceCriteria`). O BR-004 do F2 lê as ACs do corpo da BR
 e a cobertura das SPECs. A garantia de que o modelo lista as ACs no corpo é do
 prompt (SK-002), não do frontmatter.
+
+**D8 — o `sync` não reescreve o frontmatter do servidor.**
+O `sync` atualiza o que é derivado do conteúdo (`sha`, `status`/promoção) e
+**preserva** os campos que o servidor alocou: `id`, `status`, `createdFrom`,
+`doubtsIndex`, `dependsOn`, timestamps. Se o arquivo no repo divergir do que o
+servidor gerou, o `sync` marca `changed` e re-linta — a origem da verdade dos
+IDs continua sendo o servidor.
 
 ## 9. Dependências e ondas de paralelismo
 
