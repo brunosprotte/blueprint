@@ -358,9 +358,15 @@ máx. 200).
   `001_bootstrap.sql`; índice GIN em `tsv` em §8.1). Colunas usadas por F3:
   `id, source_kind, heading, text, token_count, tsv, corpus_id` —
   `artifact_id`/`demand_id` ficam `NULL`.
-- **Escrita**: F3 faz `DELETE FROM chunks WHERE corpus_id = 'method'` e reinsere os
-  chunks do corpus quando o hash muda. Como o corpus é **derivado** (read-only do git),
-  reindexar é barato e não há estado de usuário a perder.
+- **Escrita**: **o F7 é o dono da escrita em `chunks`** (Contrato Comum §7.6 — `indexer.py`
+  tem `async def index_method() -> int  # corpus 'method'`). O F3 **não** apaga nem reinsere
+  o corpus: o seu `index_chunks` **delega ao F7 por import tardio** (ou sai da escrita).
+  Antes o F3 escrevia direto (`DELETE ... WHERE corpus_id = 'method'` + INSERT) e o F7
+  escrevia o mesmo corpus por fora — quem rodasse por último apagava o outro, e os dois
+  formatos de chunk divergiam (o F7 preenchia `source_ref`, o F3 não).
+  O F3 **serve** o método (API `/api/method/*`, `/api/skills/*` e a busca FTS provisória);
+  a indexação é do F7. Como o corpus é **derivado** (read-only do git), reindexar é barato
+  e não há estado de usuário a perder.
 - **Chunking**: divide por seção **H2** (`^## `) — a unidade de decisão do blueprint
   (design master §14.1). Documento sem nenhum H2 → **um** chunk, `heading` = o H1 (ou o
   título do frontmatter). `text` = corpo da seção, `strip()`, truncado em **800
