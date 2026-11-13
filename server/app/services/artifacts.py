@@ -384,43 +384,18 @@ def _repo_root() -> Path:
         return Path(__file__).resolve().parents[3]
 
 
-class DoubtsSidecars:
-    """Universo dos sidecars de dúvidas — o caminho que o PATH-002 resolve.
-
-    O sidecar **nunca** vira linha de `artifacts` (Contrato Comum §8.4 D1): o
-    caminho vive em `artifacts.doubts_index` e o conteúdo no evento
-    `doubts_file_rendered`. É esse índice que o linter consulta — o servidor
-    nunca lê o filesystem do repo de dev (invariante 1).
-    """
-
-    def __init__(self, pool):
-        self._pool = pool
-        self._paths: set[str] = set()
-
-    async def refresh(self) -> int:
-        rows = await self._pool.fetch(
-            "SELECT doubts_index FROM artifacts WHERE doubts_index IS NOT NULL"
-        )
-        self._paths = {row["doubts_index"] for row in rows if row["doubts_index"]}
-        return len(self._paths)
-
-    def exists(self, ref: str) -> bool:
-        return self.resolve(ref) is not None
-
-    def resolve(self, ref: str) -> str | None:
-        candidate = (ref or "").strip().replace("\\", "/")
-        if candidate in self._paths:
-            return candidate
-        return None
-
-
 async def build_universe(pool):
     """Universo de links do linter.
 
-    Três partes: o corpus do **método** (repo blueprint — resolve META/PAT/TP),
-    os **artefatos sincronizados** (resolve os IDs) e os **sidecars de dúvidas**
-    (resolve o `doubtsIndex` do PATH-002). Nada é lido do repo de dev no disco:
-    o repo é fonte de *conteúdo* via `sync`, nunca via filesystem (invariante 1).
+    Duas partes: o corpus do **método** (repo blueprint — resolve META/PAT/TP) e
+    os **artefatos sincronizados** (resolve os IDs e o `doubtsIndex` do
+    PATH-002 — o `SyncedArtifacts` do F2 lê `artifacts.doubts_index`). Nada é
+    lido do repo de dev no disco: o repo é fonte de *conteúdo* via `sync`,
+    nunca via filesystem (invariante 1).
+
+    `pool` é qualquer coisa com `fetch`: o pool (visão commitada) ou a conexão
+    da transação do `sync` (visão do lote em andamento — o `doubts_index` do
+    artefato que acabou de ser gravado).
     """
     try:
         from app.lint.runner import CompositeUniverse, SyncedArtifacts
@@ -429,12 +404,9 @@ async def build_universe(pool):
     try:
         synced = SyncedArtifacts(pool)
         await synced.refresh()
-        sidecars = DoubtsSidecars(pool)
-        await sidecars.refresh()
         return CompositeUniverse(
             _method_corpus(_repo_root()),
             synced,
-            sidecars,
         )
     except Exception:
         return None
@@ -572,34 +544,29 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
     async with pool.acquire() as conn:
         async with conn.transaction():
             repo_id = await _ensure_repo_conn(conn, repo)
-            universe = await build_universe(pool)
-            findings_by_path = _lint_batch(items, universe)
-            pending_edges: list[tuple[str, str, dict]] = []
 
+            # -- Fase 1: escrita do lote -----------------------------------
+            # O `doubts_index` do artefato nasce aqui; o universo do linter só o
+            # resolve depois desta fase (PATH-002 sem falso positivo).
+            writes: list[dict] = []
             for item in items:
-                path = item["path"]
-                content = item["content"]
-                sha = item["sha"]
-                kind = item["kind"]
-                frontmatter = item["frontmatter"]
-
                 (
                     row,
                     created,
                     final_sha,
                     final_content,
                 ) = await _upsert_artifact(
-                    conn, repo_id, path, content, sha, kind, frontmatter
+                    conn,
+                    repo_id,
+                    item["path"],
+                    item["content"],
+                    item["sha"],
+                    item["kind"],
+                    item["frontmatter"],
                 )
 
-                artifact_id = row["id"]
                 status = row["status"]
-                promoted = False
                 changed = created
-
-                lint_result = _lint_counts(
-                    findings_by_path.get(path, []), available=universe is not None
-                )
 
                 if not created and final_sha != row["sha"]:
                     # O repo divergiu do que o servidor tem.
@@ -609,9 +576,9 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                             "conteúdo divergente do servidor",
                             409,
                             {
-                                "path": path,
+                                "path": item["path"],
                                 "server_sha": row["sha"],
-                                "client_sha": sha,
+                                "client_sha": item["sha"],
                                 "server_status": row["status"],
                             },
                         )
@@ -622,12 +589,50 @@ async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> di
                            SET content = $2, sha = $3, updated_at = now()
                          WHERE id = $1
                         """,
-                        artifact_id,
+                        row["id"],
                         final_content,
                         final_sha,
                     )
                     changed = True
-                elif not created and status == "draft":
+
+                writes.append(
+                    {
+                        "id": row["id"],
+                        "created": created,
+                        "changed": changed,
+                        "status": status,
+                        "sha": final_sha,
+                    }
+                )
+
+            # -- Fase 2: universo + lint do lote -----------------------------
+            # O refresh do `SyncedArtifacts` roda DEPOIS dos INSERTs e ANTES do
+            # lint: o snapshot enxerga o `doubts_index` do artefato recem-
+            # sincronizado. A conexão é a da transação — o que ainda não foi
+            # commitado precisa entrar no snapshot.
+            universe = await build_universe(conn)
+            findings_by_path = _lint_batch(items, universe)
+
+            # -- Fase 3: lint, promoção e eventos ---------------------------
+            pending_edges: list[tuple[str, str, dict]] = []
+
+            for item, write in zip(items, writes):
+                path = item["path"]
+                kind = item["kind"]
+                frontmatter = item["frontmatter"]
+
+                artifact_id = write["id"]
+                created = write["created"]
+                changed = write["changed"]
+                status = write["status"]
+                final_sha = write["sha"]
+                promoted = False
+
+                lint_result = _lint_counts(
+                    findings_by_path.get(path, []), available=universe is not None
+                )
+
+                if not created and status == "draft":
                     # Mesmo conteúdo (após o merge): o artefato está no repo.
                     if lint_result["available"] and lint_result["error"] == 0:
                         await apply_artifact_transition(
