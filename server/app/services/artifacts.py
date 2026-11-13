@@ -313,12 +313,43 @@ async def build_universe(pool, repo_path: str | Path | None = None):
         await synced.refresh()
         parts = []
         if repo_path:
-            parts.append(MethodCorpus(Path(repo_path)))
-        parts.append(MethodCorpus(_repo_root()))
+            parts.append(_method_corpus(Path(repo_path)))
+        parts.append(_method_corpus(_repo_root()))
         parts.append(synced)
         return CompositeUniverse(*parts)
     except Exception:
         return None
+
+
+#: Corpus do método indexado em memória, por raiz (mesmo cache do router de lint).
+_CORPUS_CACHE: dict[str, object] = {}
+
+#: Path do repo do dev por `repo_id` — o servidor roda na mesma máquina do repo
+#: de dev, e o `sync` informa o path (Contrato Comum §8.4 D1).
+_REPO_PATHS: dict[str, str] = {}
+
+
+def _method_corpus(root: Path):
+    """`MethodCorpus` memoizado por raiz — reindexar o disco a cada sync seria caro."""
+    from app.lint.runner import MethodCorpus
+
+    key = str(root)
+    corpus = _CORPUS_CACHE.get(key)
+    if corpus is None:
+        corpus = MethodCorpus(root)
+        _CORPUS_CACHE[key] = corpus
+    return corpus
+
+
+def remember_repo_path(repo_id: str | None, path: str | None) -> None:
+    """Guarda o path do repo do dev para os gates de lint seguintes."""
+    if repo_id and path:
+        _REPO_PATHS[str(repo_id)] = str(path)
+
+
+def repo_path_for(repo_id: str | None) -> str | None:
+    """Path do repo do dev conhecido para este `repo_id` (ou `None`)."""
+    return _REPO_PATHS.get(str(repo_id)) if repo_id else None
 
 
 def _lint_batch(items: list[dict], universe) -> dict[str, list]:
@@ -445,12 +476,15 @@ async def sync(
             }
         )
 
-    universe = await build_universe(pool, repo_path)
-    findings_by_path = _lint_batch(items, universe)
-
     async with pool.acquire() as conn:
         async with conn.transaction():
             repo_id = await _ensure_repo_conn(conn, repo)
+            remember_repo_path(str(repo_id), repo_path)
+            universe = await build_universe(
+                pool, repo_path or repo_path_for(str(repo_id))
+            )
+            findings_by_path = _lint_batch(items, universe)
+            pending_edges: list[tuple[str, str, dict]] = []
 
             for item in items:
                 path = item["path"]
@@ -509,7 +543,7 @@ async def sync(
                         )
                         changed = True
 
-                await _sync_edges(conn, artifact_id, kind, frontmatter)
+                pending_edges.append((artifact_id, kind, frontmatter))
 
                 summary["artifacts"] += 1
                 summary["created"] += int(created)
@@ -560,6 +594,11 @@ async def sync(
                         "lint": {"error": lint_result["error"], "warning": lint_result["warning"]},
                     }
                 )
+
+            # As arestas sao gravadas depois do lote: o `parent` e o `child`
+            # precisam ja existir em `artifacts` (FK).
+            for artifact_id, kind, frontmatter in pending_edges:
+                await _sync_edges(conn, artifact_id, kind, frontmatter)
 
     results.sort(key=lambda item: item["path"])
     return {"repo": repo, "artifacts": results, "summary": summary}
@@ -673,8 +712,11 @@ async def _sync_edges(conn, artifact_id: str, kind: str, frontmatter: dict) -> N
             edges.append((artifact_id, other, "tests"))
 
     for parent_id, child_id, edge_type in edges:
-        exists = await conn.fetchval("SELECT 1 FROM artifacts WHERE id = $1", child_id)
-        if not exists:
+        # Foreign key: as duas pontas precisam existir em `artifacts`.
+        existing = await conn.fetch(
+            "SELECT id FROM artifacts WHERE id IN ($1, $2)", parent_id, child_id
+        )
+        if len(existing) < 2:
             continue
         await conn.execute(
             """
@@ -691,9 +733,9 @@ async def _sync_edges(conn, artifact_id: str, kind: str, frontmatter: dict) -> N
 # --------------------------------------------------------------------------
 # Transições de artefato
 # --------------------------------------------------------------------------
-async def _lint_for_artifact(pool, artifact: dict):
+async def _lint_for_artifact(pool, artifact: dict, repo_path: str | None = None):
     """Lint estrutural do artefato — `None` se o linter (F2) não existir."""
-    universe = await build_universe(pool)
+    universe = await build_universe(pool, repo_path)
     if universe is None:
         return None
     frontmatter, body = parse_frontmatter(artifact.get("content") or "")
@@ -708,12 +750,20 @@ async def _lint_for_artifact(pool, artifact: dict):
     )
 
 
-async def request_review(pool, *, artifact_id: str, actor_id: str) -> dict:
+async def request_review(
+    pool,
+    *,
+    artifact_id: str,
+    actor_id: str,
+    repo_path: str | None = None,
+) -> dict:
     artifact = await get_artifact(pool, artifact_id)
     if artifact is None:
         raise ApiError("not_found", "artefato inexistente", 404, {"id": artifact_id})
 
-    findings = await _lint_for_artifact(pool, artifact)
+    findings = await _lint_for_artifact(
+        pool, artifact, repo_path or repo_path_for(artifact.get("repo_id"))
+    )
     if findings is not None:
         errors = [f for f in findings if getattr(f, "severity", None) == "error"]
         if errors:
@@ -746,6 +796,16 @@ async def request_review(pool, *, artifact_id: str, actor_id: str) -> dict:
     )
 
 
+def _pipeline_unavailable(artifact_id: str) -> ApiError:
+    """503 do pipeline de aprovação (F6 ainda não entregue o `run_pipeline`)."""
+    return ApiError(
+        "pipeline_unavailable",
+        "pipeline de aprovação indisponível",
+        503,
+        {"id": artifact_id},
+    )
+
+
 async def approve(pool, *, artifact_id: str, actor_id: str) -> dict:
     """`on user review` → `on agents review` + pipeline do F6.
 
@@ -766,12 +826,12 @@ async def approve(pool, *, artifact_id: str, actor_id: str) -> dict:
     try:
         from app.services import reviewers  # F6 — import tardio
     except ImportError:
-        raise ApiError(
-            "pipeline_unavailable",
-            "pipeline de aprovação indisponível",
-            503,
-            {"id": artifact_id},
-        ) from None
+        raise _pipeline_unavailable(artifact_id) from None
+
+    run_pipeline = getattr(reviewers, "run_pipeline", None)
+    if run_pipeline is None:
+        # O módulo do F6 existe como stub, mas o pipeline ainda não.
+        raise _pipeline_unavailable(artifact_id) from None
 
     await apply_artifact_transition(
         pool,
@@ -780,7 +840,7 @@ async def approve(pool, *, artifact_id: str, actor_id: str) -> dict:
         actor_id=actor_id,
         event_type="artifact.agents_review_started",
     )
-    result = await reviewers.run_pipeline(artifact)
+    result = await run_pipeline(artifact)
     to_dict = getattr(result, "to_dict", None)
     return {
         "artifact": await get_artifact(pool, artifact_id),
