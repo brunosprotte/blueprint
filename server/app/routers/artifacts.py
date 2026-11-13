@@ -30,11 +30,6 @@ class SyncDoc(BaseModel):
 class SyncBody(BaseModel):
     repo: str
     docs: list[SyncDoc] = []
-    repo_path: str | None = None
-
-
-class RequestReviewBody(BaseModel):
-    repo_path: str | None = None
 
 
 @router.get("/artifacts")
@@ -101,7 +96,6 @@ async def sync(
         repo=body.repo,
         docs=[doc.model_dump() for doc in body.docs],
         actor_id=user.id,
-        repo_path=body.repo_path,
     )
 
 
@@ -112,16 +106,10 @@ async def sync(
 @api_route
 async def request_review(
     artifact_id: str,
-    body: RequestReviewBody | None = None,
     user: User = Depends(require_user),
 ) -> dict:
     pool = await get_pool()
-    return await service.request_review(
-        pool,
-        artifact_id=artifact_id,
-        actor_id=user.id,
-        repo_path=body.repo_path if body else None,
-    )
+    return await service.request_review(pool, artifact_id=artifact_id, actor_id=user.id)
 
 
 @router.post(

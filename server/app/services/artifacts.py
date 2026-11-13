@@ -16,6 +16,7 @@ from app.db import fetch, fetchrow
 from app.services.lifecycle import (
     ApiError,
     apply_artifact_transition,
+    as_json,
     as_uuid,
     jsonable,
     record_event,
@@ -170,7 +171,57 @@ async def list_pending(pool, *, repo: str, demand_id: str | None = None) -> list
             "content": r["content"] or "",
         }
         for r in rows
-    ]
+    ] + await _pending_doubts_files(pool, repo=repo, demand_id=demand_id)
+
+
+async def _pending_doubts_files(pool, *, repo: str, demand_id: str | None) -> list[dict]:
+    """Arquivos de dúvidas que o `pull` precisa escrever no repo de dev.
+
+    O sidecar **não** é linha de `artifacts` (Contrato Comum §8.4 D1): o canal de
+    publicação é o evento `doubts_file_rendered` (F5/F6), com `path`, `content`
+    e `sha`. O último evento de cada artefato vence.
+    """
+    owner, name = split_repo(repo)
+    args: list[object] = [owner, name]
+    clause = (
+        "e.type = 'doubts_file_rendered'"
+        " AND r.owner = $1 AND r.name = $2"
+    )
+    if demand_id:
+        args.append(as_uuid(demand_id))
+        clause += " AND e.demand_id = $3"
+
+    rows = await fetch(
+        pool,
+        f"""
+        SELECT e.payload, e.at, e.id
+          FROM events e
+          JOIN artifacts a ON a.id = e.artifact_id
+          JOIN repos r ON r.id = a.repo_id
+         WHERE {clause}
+         ORDER BY e.at DESC, e.id DESC
+        """,
+        *args,
+    )
+
+    files: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        payload = as_json(row["payload"]) or {}
+        path = str(payload.get("path") or "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        files.append(
+            {
+                "id": str(payload.get("artifact_id") or ""),
+                "kind": "doubts",
+                "path": path,
+                "status": None,
+                "content": payload.get("content") or "",
+            }
+        )
+    return files
 
 
 async def list_doubts(pool, artifact_id: str) -> list[dict]:
@@ -291,42 +342,64 @@ def _repo_root() -> Path:
         return Path(__file__).resolve().parents[3]
 
 
-async def build_universe(pool, repo_path: str | Path | None = None):
+class DoubtsSidecars:
+    """Universo dos sidecars de dúvidas — o caminho que o PATH-002 resolve.
+
+    O sidecar **nunca** vira linha de `artifacts` (Contrato Comum §8.4 D1): o
+    caminho vive em `artifacts.doubts_index` e o conteúdo no evento
+    `doubts_file_rendered`. É esse índice que o linter consulta — o servidor
+    nunca lê o filesystem do repo de dev (invariante 1).
+    """
+
+    def __init__(self, pool):
+        self._pool = pool
+        self._paths: set[str] = set()
+
+    async def refresh(self) -> int:
+        rows = await self._pool.fetch(
+            "SELECT doubts_index FROM artifacts WHERE doubts_index IS NOT NULL"
+        )
+        self._paths = {row["doubts_index"] for row in rows if row["doubts_index"]}
+        return len(self._paths)
+
+    def exists(self, ref: str) -> bool:
+        return self.resolve(ref) is not None
+
+    def resolve(self, ref: str) -> str | None:
+        candidate = (ref or "").strip().replace("\\", "/")
+        if candidate in self._paths:
+            return candidate
+        return None
+
+
+async def build_universe(pool):
     """Universo de links do linter.
 
-    `repo_path` é a raiz do **repo do dev** (o repo sincronizado): o
-    `MethodCorpus` varre `<repo>/docs` e indexa o sidecar de dúvidas com o path
-    relativo `docs/implementation-artifacts/...` — exatamente o formato que o
-    PATH-002 resolve (Contrato Comum §8.4 D1). `MethodCorpus(repo_path / "docs")`
-    produziria corpus vazio (`docs/docs`).
-
-    O corpus do método (repo blueprint) entra junto: é ele que resolve as
-    referências META/PAT/TP dos artefatos. Sem `repo_path`, o universo é só esse
-    — e o sidecar do lote resolve pelo universo do próprio lote (`lint_batch`).
+    Três partes: o corpus do **método** (repo blueprint — resolve META/PAT/TP),
+    os **artefatos sincronizados** (resolve os IDs) e os **sidecars de dúvidas**
+    (resolve o `doubtsIndex` do PATH-002). Nada é lido do repo de dev no disco:
+    o repo é fonte de *conteúdo* via `sync`, nunca via filesystem (invariante 1).
     """
     try:
-        from app.lint.runner import CompositeUniverse, MethodCorpus, SyncedArtifacts
+        from app.lint.runner import CompositeUniverse, SyncedArtifacts
     except ImportError:
         return None
     try:
         synced = SyncedArtifacts(pool)
         await synced.refresh()
-        parts = []
-        if repo_path:
-            parts.append(_method_corpus(Path(repo_path)))
-        parts.append(_method_corpus(_repo_root()))
-        parts.append(synced)
-        return CompositeUniverse(*parts)
+        sidecars = DoubtsSidecars(pool)
+        await sidecars.refresh()
+        return CompositeUniverse(
+            _method_corpus(_repo_root()),
+            synced,
+            sidecars,
+        )
     except Exception:
         return None
 
 
 #: Corpus do método indexado em memória, por raiz (mesmo cache do router de lint).
 _CORPUS_CACHE: dict[str, object] = {}
-
-#: Path do repo do dev por `repo_id` — o servidor roda na mesma máquina do repo
-#: de dev, e o `sync` informa o path (Contrato Comum §8.4 D1).
-_REPO_PATHS: dict[str, str] = {}
 
 
 def _method_corpus(root: Path):
@@ -339,17 +412,6 @@ def _method_corpus(root: Path):
         corpus = MethodCorpus(root)
         _CORPUS_CACHE[key] = corpus
     return corpus
-
-
-def remember_repo_path(repo_id: str | None, path: str | None) -> None:
-    """Guarda o path do repo do dev para os gates de lint seguintes."""
-    if repo_id and path:
-        _REPO_PATHS[str(repo_id)] = str(path)
-
-
-def repo_path_for(repo_id: str | None) -> str | None:
-    """Path do repo do dev conhecido para este `repo_id` (ou `None`)."""
-    return _REPO_PATHS.get(str(repo_id)) if repo_id else None
 
 
 def _lint_batch(items: list[dict], universe) -> dict[str, list]:
@@ -429,19 +491,8 @@ def _lint_counts(findings, available: bool = True) -> dict:
 # --------------------------------------------------------------------------
 # Sync
 # --------------------------------------------------------------------------
-async def sync(
-    pool,
-    *,
-    repo: str,
-    docs: list[dict],
-    actor_id: str | None,
-    repo_path: str | None = None,
-) -> dict:
-    """Upsert por `(repo_id, path)`. Uma transação só; divergência aborta tudo.
-
-    `repo_path` = raiz do repo do dev no disco (opcional): é o corpus sobre o
-    qual o linter resolve os links do repo sincronizado (Contrato Comum §8.4 D1).
-    """
+async def sync(pool, *, repo: str, docs: list[dict], actor_id: str | None) -> dict:
+    """Upsert por `(repo_id, path)`. Uma transação só; divergência aborta tudo."""
     results: list[dict] = []
     summary = {
         "docs": len(docs),
@@ -479,10 +530,7 @@ async def sync(
     async with pool.acquire() as conn:
         async with conn.transaction():
             repo_id = await _ensure_repo_conn(conn, repo)
-            remember_repo_path(str(repo_id), repo_path)
-            universe = await build_universe(
-                pool, repo_path or repo_path_for(str(repo_id))
-            )
+            universe = await build_universe(pool)
             findings_by_path = _lint_batch(items, universe)
             pending_edges: list[tuple[str, str, dict]] = []
 
@@ -733,9 +781,9 @@ async def _sync_edges(conn, artifact_id: str, kind: str, frontmatter: dict) -> N
 # --------------------------------------------------------------------------
 # Transições de artefato
 # --------------------------------------------------------------------------
-async def _lint_for_artifact(pool, artifact: dict, repo_path: str | None = None):
+async def _lint_for_artifact(pool, artifact: dict):
     """Lint estrutural do artefato — `None` se o linter (F2) não existir."""
-    universe = await build_universe(pool, repo_path)
+    universe = await build_universe(pool)
     if universe is None:
         return None
     frontmatter, body = parse_frontmatter(artifact.get("content") or "")
@@ -750,20 +798,12 @@ async def _lint_for_artifact(pool, artifact: dict, repo_path: str | None = None)
     )
 
 
-async def request_review(
-    pool,
-    *,
-    artifact_id: str,
-    actor_id: str,
-    repo_path: str | None = None,
-) -> dict:
+async def request_review(pool, *, artifact_id: str, actor_id: str) -> dict:
     artifact = await get_artifact(pool, artifact_id)
     if artifact is None:
         raise ApiError("not_found", "artefato inexistente", 404, {"id": artifact_id})
 
-    findings = await _lint_for_artifact(
-        pool, artifact, repo_path or repo_path_for(artifact.get("repo_id"))
-    )
+    findings = await _lint_for_artifact(pool, artifact)
     if findings is not None:
         errors = [f for f in findings if getattr(f, "severity", None) == "error"]
         if errors:

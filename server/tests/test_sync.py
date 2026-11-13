@@ -25,7 +25,6 @@ from app.services import demands as demands_service
 from app.services.lifecycle import ApiError
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-DOUBTS_REPO = FIXTURES / "doubts-repo"
 BR_VALID = (FIXTURES / "br_valida.md").read_text(encoding="utf-8")
 SPEC_VALID = (FIXTURES / "spec_valida.md").read_text(encoding="utf-8")
 
@@ -85,13 +84,12 @@ async def _new_demand(pool, repo_id: str, created_by: str, title: str = "demanda
 
 
 async def _sync(pool, docs: list[dict], repo: str = "acme/app") -> dict:
-    """Sync com o repo do dev de fixture (o corpus que resolve o sidecar)."""
+    """Sync repo→servidor: o repo entra pelo conteúdo, nunca pelo filesystem."""
     return await artifacts_service.sync(
         pool,
         repo=repo,
         docs=docs,
         actor_id=None,
-        repo_path=str(DOUBTS_REPO),
     )
 
 
@@ -757,6 +755,42 @@ async def test_pending_route_requires_repo(client, auth_token):
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_pending_route_delivers_doubts_sidecar(client, auth_token, pool):
+    """O `pull` entrega o arquivo de dúvidas publicado no evento (D1 revisado).
+
+    O sidecar nunca vira linha de `artifacts`: o canal de publicação é o evento
+    `doubts_file_rendered` (F5/F6), com path, content e sha.
+    """
+    await _sync(pool, [{"path": BR_PATH, "content": BR_VALID}])
+    await pool.execute(
+        "INSERT INTO events (artifact_id, type, payload) "
+        "VALUES ('BR-001', 'doubts_file_rendered', $1::jsonb)",
+        json.dumps(
+            {
+                "artifact_id": "BR-001",
+                "path": "docs/implementation-artifacts/duvidas-br/BR-001.md",
+                "content": "---\nid: BR-001\n---\n\n# Dúvidas — BR-001\n",
+                "sha": "abc",
+            }
+        ),
+    )
+
+    response = await client.get(
+        "/api/artifacts/pending", params={"repo": "acme/app"}, headers=_auth(auth_token)
+    )
+
+    assert response.status_code == 200
+    artifacts = response.json()["artifacts"]
+    sidecars = [item for item in artifacts if item["kind"] == "doubts"]
+    assert len(sidecars) == 1
+    assert sidecars[0]["path"] == "docs/implementation-artifacts/duvidas-br/BR-001.md"
+    assert "# Dúvidas — BR-001" in sidecars[0]["content"]
+
+    # O sidecar não é linha de `artifacts`.
+    assert await pool.fetchval("SELECT count(*) FROM artifacts WHERE kind = 'doubts'") == 0
 
 
 @pytest.mark.asyncio
