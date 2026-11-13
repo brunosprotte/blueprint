@@ -128,14 +128,14 @@ def _json_list(value: Any) -> list:
 
 async def search(q: str, corpus_id: str, top: int = 10) -> list[Hit]:
     """Busca no corpus `corpus_id`. Nunca mistura corpus."""
-    from app.db import fetch, get_pool
+    from app import db
 
     if corpus_id == METHOD_CORPUS:
         await ensure_method_indexed()
 
     top = max(1, min(int(top), MAX_CANDIDATES))
-    pool = await get_pool()
-    rows = await fetch(pool, _CANDIDATES_SQL, corpus_id, q)
+    pool = await db.get_pool()
+    rows = await db.fetch(pool, _CANDIDATES_SQL, corpus_id, q)
 
     candidates: list[Candidate] = []
     by_id: dict[str, Any] = {}
@@ -285,13 +285,13 @@ async def build_dossier(pool: Any, demand_id: Any) -> dict | None:
 
     Retorna `None` se a demanda não existir.
     """
-    from app.db import fetch, fetchrow
+    from app import db
 
-    demand = await fetchrow(pool, "SELECT * FROM demands WHERE id = $1", demand_id)
+    demand = await db.fetchrow(pool, "SELECT * FROM demands WHERE id = $1", demand_id)
     if demand is None:
         return None
 
-    artifact_rows = await fetch(
+    artifact_rows = await db.fetch(
         pool,
         "SELECT id, kind, module, feature, path, status, content "
         "FROM artifacts WHERE demand_id = $1 ORDER BY id",
@@ -317,7 +317,7 @@ async def build_dossier(pool: Any, demand_id: Any) -> dict | None:
 
     edges = []
     if spec_ids:
-        edge_rows = await fetch(
+        edge_rows = await db.fetch(
             pool,
             "SELECT parent_id, child_id, type FROM spec_edges "
             "WHERE parent_id = ANY($1::text[]) AND child_id = ANY($1::text[]) "
@@ -330,7 +330,7 @@ async def build_dossier(pool: Any, demand_id: Any) -> dict | None:
             for r in edge_rows
         ]
 
-    commit_rows = await fetch(
+    commit_rows = await db.fetch(
         pool,
         "SELECT id, sha, message, branch, author, files, status, created_at "
         "FROM commits WHERE demand_id = $1 ORDER BY created_at ASC, sha ASC",
@@ -350,7 +350,7 @@ async def build_dossier(pool: Any, demand_id: Any) -> dict | None:
         for r in commit_rows
     ]
 
-    review_rows = await fetch(
+    review_rows = await db.fetch(
         pool,
         "SELECT r.id, r.commit_id, r.verdict, r.findings, r.created_at, c.sha AS commit_sha "
         "FROM reviews r LEFT JOIN commits c ON c.id = r.commit_id "
@@ -371,7 +371,7 @@ async def build_dossier(pool: Any, demand_id: Any) -> dict | None:
     artifact_ids = [a["id"] for a in artifacts]
     doubts = []
     if artifact_ids:
-        doubt_rows = await fetch(
+        doubt_rows = await db.fetch(
             pool,
             "SELECT id, artifact_id, question, status, source FROM doubts "
             "WHERE artifact_id = ANY($1::text[])",
