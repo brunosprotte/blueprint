@@ -367,10 +367,13 @@ máx. 200).
   O F3 **serve** o método (API `/api/method/*`, `/api/skills/*` e a busca FTS provisória);
   a indexação é do F7. Como o corpus é **derivado** (read-only do git), reindexar é barato
   e não há estado de usuário a perder.
-- **Chunking**: divide por seção **H2** (`^## `) — a unidade de decisão do blueprint
-  (design master §14.1). Documento sem nenhum H2 → **um** chunk, `heading` = o H1 (ou o
-  título do frontmatter). `text` = corpo da seção, `strip()`, truncado em **800
-  caracteres** (mesmo teto do `tools/retrieve.py`).
+- **Chunking**: **o do F7** (`chunk_markdown`, Contrato Comum §7.6) — divide por seção
+  **H1/H2/H3** (`^(#{1,3} .+)$`). O F3 usava H2 apenas; como a escrita é do F7, vale o
+  chunking dele. `text` = corpo da seção, `strip()`, truncado em **800 caracteres**
+  (mesmo teto do `tools/retrieve.py`).
+- **Exclusão**: o corpus de chunks do F7 **não** indexa `docs/implementation-artifacts/`
+  (catálogo de dúvidas não é conhecimento do método — META-006 §9). É a mesma lista de
+  diretórios excluídos que o endpoint `/api/method/index` do F3 já usava.
 - `token_count` = contagem de tokens com o mesmo tokenizador do `tools/retrieve.py`:
   `re.compile(r"\w+", re.UNICODE)`, token minúsculo, `len > 1`.
 - `tsv` = `to_tsvector('portuguese', heading || ' ' || text)`.
