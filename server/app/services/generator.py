@@ -1140,7 +1140,7 @@ async def _insert_generated_event(
         "method_docs": [doc.doc_id for doc in ctx.method_context.documents],
         "repo_hits": len(ctx.repo_context.hits),
         "degraded": bool(ctx.method_context.degraded or ctx.repo_context.degraded),
-        "degraded_reason": ctx.repo_context.degraded_reason or ctx.method_context.degraded_reason,
+        "degraded_reason": degraded_reason(ctx),
     }
     await conn.execute(
         "INSERT INTO events (demand_id, artifact_id, type, payload, actor)"
@@ -1350,8 +1350,18 @@ def context_summary(ctx: GenerationContext) -> dict[str, Any]:
         "repo_hits": len(ctx.repo_context.hits),
         "repo_corpus_id": ctx.repo_context.corpus_id,
         "degraded": bool(ctx.method_context.degraded or ctx.repo_context.degraded),
-        "degraded_reason": ctx.repo_context.degraded_reason or ctx.method_context.degraded_reason,
+        "degraded_reason": degraded_reason(ctx),
     }
+
+
+def degraded_reason(ctx: GenerationContext) -> str | None:
+    """Motivo da degradação — método e repo, quando os dois faltaram."""
+    reasons = [
+        reason
+        for reason in (ctx.repo_context.degraded_reason, ctx.method_context.degraded_reason)
+        if reason
+    ]
+    return "; ".join(reasons) if reasons else None
 
 
 def _doubts_file_status(artifact_status: str) -> str:
