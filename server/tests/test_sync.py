@@ -358,6 +358,20 @@ async def test_sync_creates_graph_edges_canonical_direction(pool):
 
 
 @pytest.mark.asyncio
+async def test_sync_new_artifact_passes_path002_in_the_same_sync(pool):
+    """Artefato novo com `doubtsIndex` passa no PATH-002 no sync que o criou.
+
+    O universo do linter é reidO **depois** do INSERT (que grava o
+    `doubts_index`) e **antes** do lint: o snapshot enxerga o sidecar do
+    artefato que acabou de entrar. Sem isso, o PATH-002 dá falso positivo.
+    """
+    result = await _sync(pool, [{"path": BR_PATH, "content": BR_VALID}])
+
+    assert result["summary"]["lint_error"] == 0
+    assert result["summary"]["lint_warning"] == 0
+
+
+@pytest.mark.asyncio
 async def test_sync_lint_batch_covers_acs(pool):
     """BR + SPEC no mesmo lote: a AC da BR coberta pela SPEC passa (D6)."""
     docs = [
@@ -529,6 +543,8 @@ async def test_commit_route_requires_repo_token(client, auth_token, pool):
     assert error["code"] == "invalid_repo"
     assert "token" in error["message"]
     assert "repo" in error["message"]
+    # A mensagem diz o que fazer.
+    assert "use um token" in error["message"]
 
 
 @pytest.mark.asyncio
@@ -583,6 +599,19 @@ async def test_commits_route_by_demand(client, pool):
     assert response.status_code == 200
     commits = response.json()["commits"]
     assert [commit["sha"] for commit in commits] == ["a1b2c3d"]
+
+
+def test_commit_routes_coexist():
+    """`GET /api/commits` e `GET /api/commits/{demand_id}` convivem.
+
+    `app.routes` não achata os routers — a verificação usa o OpenAPI.
+    """
+    from app.main import app
+
+    paths = app.openapi()["paths"]
+
+    assert "get" in paths["/api/commits"]
+    assert "get" in paths["/api/commits/{demand_id}"]
 
 
 @pytest.mark.asyncio
@@ -743,8 +772,30 @@ async def test_request_review_promotes(pool):
 
 
 @pytest.mark.asyncio
-async def test_approve_pipeline_unavailable_503(pool):
-    """Sem o F6 → 503 `pipeline_unavailable` e o status não muda (contrato §8.1)."""
+async def test_approve_runs_the_f6_pipeline(pool, monkeypatch):
+    """Com o F6 real, `approve` roda o pipeline — não há 503 `pipeline_unavailable`.
+
+    Sem LLM (cliente não construído) o pipeline responde `verdict="pending"` e o
+    artefato fica em `on agents review`: falha de LLM não promove nem bloqueia
+    (design master §19).
+    """
+    reviewers = pytest.importorskip(
+        "app.services.reviewers", reason="F6 pendente: pipeline de aprovação ainda não existe"
+    )
+    if getattr(reviewers, "run_pipeline", None) is None:
+        pytest.skip("F6 pendente: pipeline de aprovação ainda não existe")
+
+    try:
+        from app.services import generator
+    except ImportError:
+        generator = None
+
+    def _no_client():
+        raise RuntimeError("sem credencial no teste")
+
+    if generator is not None:
+        monkeypatch.setattr(generator, "build_client", _no_client)
+
     docs = [{"path": BR_PATH, "content": BR_VALID}]
     await _sync(pool, docs)
     await _sync(pool, docs)
@@ -752,14 +803,17 @@ async def test_approve_pipeline_unavailable_503(pool):
         pool, artifact_id="BR-001", actor_id=await _actor(pool)
     )
 
-    with pytest.raises(ApiError) as excinfo:
-        await artifacts_service.approve(pool, artifact_id="BR-001", actor_id=await _actor(pool))
+    result = await artifacts_service.approve(
+        pool, artifact_id="BR-001", actor_id=await _actor(pool)
+    )
 
-    assert excinfo.value.code == "pipeline_unavailable"
-    assert excinfo.value.status == 503
+    assert result["artifact"]["status"] == "on agents review"
+    pipeline = result["pipeline"]
+    assert pipeline["verdict"] == "pending"
+    assert pipeline["llm_available"] is False
 
     row = await pool.fetchrow("SELECT status FROM artifacts WHERE id = 'BR-001'")
-    assert row["status"] == "on user review"
+    assert row["status"] == "on agents review"
 
 
 @pytest.mark.asyncio
