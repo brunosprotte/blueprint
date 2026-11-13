@@ -18,6 +18,7 @@ Contrato: Contrato Comum §7.4. Spec da fase: §5.1–§5.8.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
 import re
@@ -28,6 +29,7 @@ from typing import Any
 
 from app.services.doubts import (
     _insert_doubt,
+    as_uuid,
     list_open_doubts,
     publish_artifact_doubts,
     to_iso,
@@ -190,6 +192,11 @@ FINDING_SEVERITY_TO_DOUBT_STATUS = {
 
 _AC_RE = re.compile(r"\bAC-\d{3}\b")
 
+#: Linha de AC no formato canônico: `- **AC-001** — texto` (SK-001 §16).
+_AC_LINE_RE = re.compile(
+    r"^\s*[-*]?\s*\**\s*(AC-\d{3})\s*\**\s*[:\-–—]?\s*(.*)$"
+)
+
 # --------------------------------------------------------------------------
 # SQL
 # --------------------------------------------------------------------------
@@ -309,7 +316,7 @@ def _split_frontmatter(content: str) -> tuple[dict, str]:
 
 
 def extract_acs(content: str) -> list[str]:
-    """ACs de uma BR, no formato `- AC-001: <critério>` (spec §5.3)."""
+    """ACs de uma BR, no formato `- **AC-001** — <critério>` (SK-001 §16)."""
     if not content:
         return []
     seen: set[str] = set()
@@ -317,7 +324,7 @@ def extract_acs(content: str) -> list[str]:
     for line in content.replace("\r\n", "\n").split("\n"):
         if not _AC_RE.search(line):
             continue
-        match = re.match(r"\s*[-*]?\s*(AC-\d{3})\s*[:\-–—]?\s*(.*)$", line)
+        match = _AC_LINE_RE.match(line)
         if not match:
             continue
         ac_id, rest = match.group(1), match.group(2).strip()
@@ -396,7 +403,7 @@ async def _sibling_docs(artifact: Any) -> list[Any]:
     artifact_id = _field(artifact, "id")
     if not demand_id:
         return []
-    rows = await _fetch(_SQL_SIBLING_SPECS, demand_id, artifact_id)
+    rows = await _fetch(_SQL_SIBLING_SPECS, as_uuid(demand_id), artifact_id)
     docs = []
     for row in rows:
         content = _field(row, "content") or ""
@@ -419,26 +426,25 @@ async def _sibling_docs(artifact: Any) -> list[Any]:
 async def _run_linter(artifact: Any) -> tuple[list[dict], str | None]:
     """Roda o linter do F2. Devolve (findings, erro).
 
+    O universo é o do **F4** (`build_universe`): corpus do método + artefatos
+    sincronizados + **sidecars de dúvidas**. Sem os sidecars, o PATH-002
+    reprova todo artefato por `doubtsIndex` inexistente — falso positivo
+    (Contrato Comum §8.4 D1/D2).
+
     Erro aqui é falha determinística e conhecida: `verdict="blocking"`, nenhum
     token de LLM gasto (design master §12).
     """
     try:
-        from app.lint import (
-            CompositeUniverse,
-            MethodCorpus,
-            SyncedArtifacts,
-            lint_batch,
-        )
+        from app.services.artifacts import build_universe
     except ImportError as exc:
         return [], f"indisponível: {exc}"
 
     try:
-        from app.config import settings
+        universe = await build_universe(await _pool())
+        if universe is None:
+            return [], "indisponível: universo de links"
+        from app.lint import lint_batch
 
-        universe = CompositeUniverse(
-            MethodCorpus(settings.repo_root),
-            SyncedArtifacts(await _pool()),
-        )
         docs = [_to_doc(artifact), *await _sibling_docs(artifact)]
         findings = lint_batch(docs, universe)
         return [_finding_to_dict(f) for f in findings], None
@@ -450,6 +456,17 @@ async def _pool() -> Any:
     from app.db import get_pool
 
     return await get_pool()
+
+
+async def _current_status(artifact_id: str) -> str:
+    """Status do artefato **no banco** — o snapshot recebido pode ser velho.
+
+    O F4 transiciona `on user review -> on agents review` antes de chamar o
+    pipeline (F4 `approve`); o dicionário que ele passa ainda diz
+    `on user review`.
+    """
+    row = await _fetchrow(_SQL_ARTIFACT_STATUS, artifact_id)
+    return _field(row, "status") or ""
 
 
 # --------------------------------------------------------------------------
@@ -674,11 +691,11 @@ async def _publish_event(
 ) -> None:
     await _execute(
         _SQL_EVENT,
-        demand_id,
+        as_uuid(demand_id),
         artifact_id,
         event_type,
         json.dumps(payload, ensure_ascii=False),
-        actor,
+        as_uuid(actor),
     )
 
 
@@ -703,7 +720,12 @@ async def _publish_stage(
 
 
 async def call_lifecycle_transition(
-    fn_name: str, entity_id: str, target: str, actor_id: str | None = None
+    fn_name: str,
+    entity_id: str,
+    target: str,
+    actor_id: str | None = None,
+    *,
+    conn: Any | None = None,
 ) -> bool:
     """Aplica uma transição de status **via `services/lifecycle.py` (F4)**.
 
@@ -713,11 +735,14 @@ async def call_lifecycle_transition(
     escreve `(pool, artifact_id, target)`. O F6 entrega a conexão quando o pool
     sabe entregar, senão o pool; e só passa os kwargs que a função aceita.
 
+    `conn` (opcional) é a conexão do chamador: a transição entra na transação
+    do chamador — nada é gravado em parte.
+
     Devolve `True` quando a transição foi aplicada, `False` quando o F4 ainda
     não existe. Exceções do F4 (ex.: `IllegalTransition`) propagam.
     """
     try:
-        from app.services import lifecycle
+        lifecycle = importlib.import_module("app.services.lifecycle")
     except ImportError:
         return False
 
@@ -733,12 +758,16 @@ async def call_lifecycle_transition(
         kwargs["demand_id"] = entity_id
     accepted = {k: v for k, v in kwargs.items() if k in params}
 
+    if conn is not None:
+        await fn(conn, **accepted)
+        return True
+
     pool = await _pool()
     acquire = getattr(pool, "acquire", None)
     if acquire is not None:
-        async with acquire() as conn:
-            async with conn.transaction():
-                await fn(conn, **accepted)
+        async with acquire() as acquired:
+            async with acquired.transaction():
+                await fn(acquired, **accepted)
     else:
         await fn(pool, **accepted)
     return True
@@ -956,13 +985,12 @@ async def run_pipeline(
         and len(open_doubts) == 0
     )
 
-    artifact_status = _field(artifact, "status") or ""
+    artifact_status = await _current_status(artifact_id)
     if approval_ready and artifact_status == "on agents review":
         promoted = await _apply_approved(artifact_id, actor)
-        row = await _fetchrow(_SQL_ARTIFACT_STATUS, artifact_id)
-        if row is not None:
-            artifact_status = _field(row, "status") or artifact_status
+        artifact_status = await _current_status(artifact_id)
         if not promoted or artifact_status != "approved":
+            approval_ready = False
             blocking_reasons.append("transição para approved falhou")
 
     blocking_reasons = list(dict.fromkeys(blocking_reasons))
