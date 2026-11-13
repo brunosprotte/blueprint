@@ -645,8 +645,8 @@ Response **200**:
     {"path": "docs/implementation-artifacts/duvidas-spec/SPEC-024.md", "content": "..."}
   ],
   "spec_edges": [
-    {"parent_id": "BR-013", "child_id": "SPEC-024", "type": "derives_from"},
-    {"parent_id": "SPEC-025", "child_id": "SPEC-024", "type": "depends_on"},
+    {"parent_id": "SPEC-024", "child_id": "BR-013", "type": "derives_from"},
+    {"parent_id": "SPEC-024", "child_id": "SPEC-025", "type": "depends_on"},
     {"parent_id": "SPEC-029", "child_id": "SPEC-024", "type": "tests"}
   ],
   "context": {"method_docs": ["SK-002", "META-001", ...], "repo_hits": 3,
@@ -758,10 +758,13 @@ responsabilidades que declara em "Acceptance Criteria atendidos".
 
 - [ ] `POST /api/generation/demands/{id}/br` devolve BR com os 12 campos de frontmatter
       de SK-001 §16, na ordem, e as 9 seções de SK-001 §14 no corpo.
-- [ ] `POST /api/generation/artifacts/{id}/specs` devolve SPECs com os 15 campos de
-      frontmatter de SK-002 §15 e as 14 seções de SK-002 §10.
-- [ ] Toda AC da BR aparece em `acceptanceCriteria` de ≥1 SPEC gerada.
-- [ ] `spec_edges` contém uma aresta `derives_from` por SPEC, apontando para a BR.
+- [ ] `POST /api/generation/artifacts/{id}/specs` devolve SPECs com os 16 campos de
+      frontmatter de SK-002 §15 (+ `complexity` + `dependsOn`, conforme o Contrato
+      Comum §8.4 D3) e as 14 seções de SK-002 §10.
+- [ ] Toda AC da BR aparece no corpo da SPEC, na seção "Acceptance Criteria"
+      (§8.4 D7 — as ACs não vão para o frontmatter).
+- [ ] `spec_edges` contém uma aresta `derives_from` por SPEC, com **parent = SPEC,
+      child = BR** (§8.4 D4).
 - [ ] `depends_on` e `tests` do grafo do modelo viram arestas com o ID real do servidor.
 - [ ] `doubtsIndex` do frontmatter aponta para `duvidas-br/<id>.md` / `duvidas-spec/<id>.md`,
       e o arquivo é devolvido em `doubts_file`/`doubts_files` com o formato canônico v1.
