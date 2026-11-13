@@ -707,9 +707,14 @@ def check_path001(doc: "ArtifactDoc") -> list[Finding]:
     path = doc.path.replace("\\", "/").strip()
     problems: list[str] = []
     parts = path.split("/")
-    if not (path.startswith("docs/BR/") or path.startswith("docs/SPEC/")):
-        problems.append("path fora de docs/BR/<modulo>/ ou docs/SPEC/<modulo>/")
-    else:
+    if path.startswith("docs/RI/"):
+        # O RI é indexado pelo F4 como kind `ri` (contrato §8.4 D3) e a convenção
+        # de nome dele é do método (`RI-001_NOME.md`), não kebab-case.
+        # ponytail: o linter não impõe forma ao RI além da extensão — quando o
+        # contrato definir a convenção de path do RI, valida-se módulo e nome aqui.
+        if not path.endswith(".md"):
+            problems.append("arquivo sem extensao .md")
+    elif path.startswith("docs/BR/") or path.startswith("docs/SPEC/"):
         module = parts[2] if len(parts) > 2 else ""
         if not _KEBAB.match(module):
             problems.append(f"modulo '{module}' fora de kebab-case")
@@ -718,6 +723,10 @@ def check_path001(doc: "ArtifactDoc") -> list[Finding]:
             problems.append("arquivo sem extensao .md")
         elif not _KEBAB.match(name[:-3]):
             problems.append(f"nome de arquivo '{name}' fora de kebab-case")
+    else:
+        problems.append(
+            "path fora de docs/BR/<modulo>/, docs/SPEC/<modulo>/ ou docs/RI/"
+        )
     if not problems:
         return []
     return [

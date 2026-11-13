@@ -413,6 +413,40 @@ def test_path002_doubts_index_wrong_directory(universe):
 
 
 # --------------------------------------------------------------------------- #
+# PATH-001 — docs/RI/** é path canônico
+# --------------------------------------------------------------------------- #
+
+
+def test_path001_accepts_ri_document(universe):
+    """O F4 indexa `docs/RI/**` como kind `ri` — o linter não reprova o RI."""
+    doc = parse_document(
+        "docs/RI/login/autenticacao.md", read_fixture("ri_valida.md")
+    )
+    findings = lint_document(doc, universe)
+    assert "PATH-001" not in rules_of(findings)
+    assert findings == []
+
+
+def test_path001_accepts_ri_named_after_the_method_convention(universe):
+    """A convenção de nome do RI é do método (`RI-001_NOME.md`), não kebab-case."""
+    doc = parse_document(
+        "docs/RI/RI-001_CANONICAL_CRUD_REFERENCE_IMPLEMENTATION.md",
+        read_fixture("ri_valida.md"),
+    )
+    findings = lint_document(doc, universe)
+    assert "PATH-001" not in rules_of(findings)
+
+
+def test_infer_kind_recognizes_ri():
+    from app.lint.runner import infer_kind
+
+    assert infer_kind("docs/RI/RI-001_x.md") == "ri"
+    assert infer_kind("docs/BR/login/x.md") == "br"
+    assert infer_kind("docs/SPEC/login/x.md") == "spec"
+    assert infer_kind("docs/implementation-artifacts/duvidas-br/BR-001.md") is None
+
+
+# --------------------------------------------------------------------------- #
 # Determinismo
 # --------------------------------------------------------------------------- #
 
