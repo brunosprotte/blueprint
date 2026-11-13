@@ -17,7 +17,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
@@ -787,3 +787,716 @@ async def resolve_repo_context(repo_id: str, query: str, *, top: int = 5) -> Rep
         degraded=False,
         degraded_reason=None,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Geração
+# --------------------------------------------------------------------------- #
+
+
+async def generate_br(demand: "Demand", ctx: GenerationContext) -> dict[str, Any]:
+    """Gera a BR da demanda — Contrato Comum §7.3.
+
+    Devolve o `GeneratedArtifact` (6 campos). O relatório completo (arquivo de
+    dúvidas, uso de tokens) está em :func:`generate_br_report`.
+    """
+    report = await generate_br_report(demand, ctx)
+    return report.artifacts[0]
+
+
+async def generate_specs(br: "Artifact", ctx: GenerationContext) -> tuple[dict[str, Any], ...]:
+    """Gera as SPECs da BR — Contrato Comum §7.3.
+
+    Devolve a tupla de `GeneratedArtifact`. O relatório completo (arquivos de
+    dúvidas, grafo, uso de tokens) está em :func:`generate_specs_report`.
+    """
+    report = await generate_specs_report(br, ctx)
+    return report.artifacts
+
+
+async def generate_br_report(demand: "Demand", ctx: GenerationContext) -> GenerationReport:
+    """Executa SK-001 e persiste a BR, as dúvidas e o evento de geração.
+
+    Idempotente por default (D4): se a demanda já tem BR, devolve a existente sem
+    chamar o modelo e sem escrever nada.
+    """
+    data = _as_mapping(demand)
+    demand_id = str(data.get("id") or "")
+    status = str(data.get("status") or "open")
+    if status in TERMINAL_DEMAND_STATUSES:
+        raise IllegalDemandState(status, "generate-br")
+
+    existing = await _find_artifact(ctx.pool, demand_id, "br")
+    if existing is not None:
+        return await _report_from_rows(ctx, [existing], created=False, idempotent=True)
+
+    client = ctx.client or build_client()
+    user_prompt = build_br_user_prompt(
+        title=str(data.get("title") or ""),
+        body=str(data.get("body") or ""),
+        method_context=ctx.method_context,
+        repo_context=ctx.repo_context,
+    )
+    try:
+        payload, usage = await _call_model(
+            client,
+            schema=BR_SCHEMA,
+            system=BR_SYSTEM_PROMPT,
+            user=user_prompt,
+            stage="br",
+        )
+    except LLMUnavailable as exc:
+        await _reset_demand(ctx.pool, demand_id, stage="br", error=exc)
+        raise
+
+    front = payload.get("frontmatter")
+    front = front if isinstance(front, Mapping) else {}
+    module = str(front.get("module") or "")
+    feature = str(front.get("feature") or "")
+    if not SLUG_RE.match(module) or not SLUG_RE.match(feature):
+        error = InvalidArtifactPath(module, feature)
+        await _reset_demand(ctx.pool, demand_id, stage="br", error=error)
+        raise error
+
+    artifact_body = str(payload.get("body") or "")
+    questions = extract_open_questions(artifact_body)
+
+    async with ctx.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext('sdd.artifact_id'))")
+            artifact_id = await _next_artifact_id(conn, "br", "BR")
+            doubts_path = f"docs/implementation-artifacts/duvidas-br/{artifact_id}.md"
+            frontmatter = {
+                "id": artifact_id,
+                "module": module,
+                "feature": feature,
+                "type": "Business Rule",
+                "title": str(front.get("title") or ""),
+                "description": str(front.get("description") or ""),
+                "status": "draft",
+                "tags": [str(tag) for tag in (front.get("tags") or [])],
+                "timestamp": _now_iso(),
+                "doubtsIndex": doubts_path,
+                "version": "1.0.0",
+                "generatedBy": "SK-001",
+            }
+            content = render_document(frontmatter, artifact_body)
+            sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            path = f"docs/BR/{module}/{feature}.md"
+            await conn.execute(
+                "INSERT INTO artifacts (id, demand_id, repo_id, kind, module, feature, path, sha,"
+                " status, version, content) VALUES ($1,$2,$3,'br',$4,$5,$6,$7,'draft',$8,$9)",
+                artifact_id,
+                demand_id,
+                ctx.repo_id or None,
+                module,
+                feature,
+                path,
+                sha,
+                "1.0.0",
+                content,
+            )
+            for question in questions:
+                await conn.execute(
+                    "INSERT INTO doubts (artifact_id, question, status, source)"
+                    " VALUES ($1,$2,'pending','user')",
+                    artifact_id,
+                    question,
+                )
+            await _insert_generated_event(
+                conn,
+                demand_id=demand_id,
+                artifact_id=artifact_id,
+                kind="br",
+                path=path,
+                sha=sha,
+                module=module,
+                feature=feature,
+                ctx=ctx,
+            )
+
+    row = await _fetch_artifact(ctx.pool, artifact_id)
+    return await _report_from_rows(ctx, [row], created=True, usage=usage)
+
+
+async def generate_specs_report(br: "Artifact", ctx: GenerationContext) -> GenerationReport:
+    """Executa SK-002 e persiste as SPECs, o grafo, as dúvidas e os eventos.
+
+    Idempotente por default (D4): se a BR já tem SPECs, devolve as existentes sem
+    chamar o modelo e sem escrever nada.
+    """
+    data = _as_mapping(br)
+    br_id = str(data.get("id") or "")
+    br_content = str(data.get("content") or "")
+    demand_id = str(data.get("demand_id") or ctx.demand_id or "")
+    if not br_id:
+        raise ValueError("a BR de origem precisa de id")
+
+    existing = await _find_specs_of_br(ctx.pool, br_id, demand_id)
+    if existing:
+        return await _report_from_rows(ctx, existing, created=False, idempotent=True)
+
+    client = ctx.client or build_client()
+    user_prompt = build_spec_user_prompt(
+        br_content=br_content,
+        acceptance_criteria=extract_acceptance_criteria(br_content),
+        method_context=ctx.method_context,
+        repo_context=ctx.repo_context,
+    )
+    try:
+        payload, usage = await _call_model(
+            client,
+            schema=SPEC_SCHEMA,
+            system=SPEC_SYSTEM_PROMPT,
+            user=user_prompt,
+            stage="specs",
+        )
+    except LLMUnavailable as exc:
+        await _reset_demand(ctx.pool, demand_id, stage="specs", error=exc)
+        raise
+
+    specs = payload.get("specs")
+    specs = list(specs) if isinstance(specs, list) else []
+    if not specs:
+        error = LLMUnavailable("o modelo não devolveu nenhuma SPEC", stage="specs")
+        await _reset_demand(ctx.pool, demand_id, stage="specs", error=error)
+        raise error
+
+    for spec in specs:
+        feature = str((spec or {}).get("feature") or "")
+        if not SLUG_RE.match(feature):
+            error = InvalidArtifactPath(str(ctx.module), feature)
+            await _reset_demand(ctx.pool, demand_id, stage="specs", error=error)
+            raise error
+
+    br_front = parse_frontmatter(br_content)
+    module = str(br_front.get("module") or ctx.module or "")
+    technology_pack = ctx.method_context.technology_pack or "TP-001"
+
+    async with ctx.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext('sdd.artifact_id'))")
+            number = await _next_artifact_number(conn, "spec", "SPEC")
+            ids = [f"SPEC-{number + index:03d}" for index in range(len(specs))]
+            feature_to_id = {
+                str(spec.get("feature") or ""): ids[index] for index, spec in enumerate(specs)
+            }
+
+            for spec, artifact_id in zip(specs, ids):
+                feature = str(spec.get("feature") or "")
+                complexity = str(spec.get("complexity") or "MEDIUM")
+                tags = [str(tag) for tag in (spec.get("tags") or [])]
+                complexity_tag = f"complexity:{complexity}"
+                if complexity_tag not in tags:
+                    tags.append(complexity_tag)
+                doubts_path = f"docs/implementation-artifacts/duvidas-spec/{artifact_id}.md"
+                frontmatter = {
+                    "id": artifact_id,
+                    "module": module,
+                    "feature": feature,
+                    "type": "Functional Specification",
+                    "title": str(spec.get("title") or ""),
+                    "description": str(spec.get("description") or ""),
+                    "createdBy": "SK-002",
+                    "createdFrom": br_id,
+                    "technologyPack": technology_pack,
+                    "status": "draft",
+                    "tags": tags,
+                    "complexity": complexity,
+                    "timestamp": _now_iso(),
+                    "doubtsIndex": doubts_path,
+                    "version": "1.0.0",
+                }
+                content = render_document(frontmatter, str(spec.get("body") or ""))
+                sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                path = f"docs/SPEC/{module}/{feature}.md"
+                await conn.execute(
+                    "INSERT INTO artifacts (id, demand_id, repo_id, kind, module, feature, path, sha,"
+                    " status, version, content) VALUES ($1,$2,$3,'spec',$4,$5,$6,$7,'draft',$8,$9)",
+                    artifact_id,
+                    demand_id,
+                    ctx.repo_id or None,
+                    module,
+                    feature,
+                    path,
+                    sha,
+                    "1.0.0",
+                    content,
+                )
+                for question in extract_open_questions(str(spec.get("body") or "")):
+                    await conn.execute(
+                        "INSERT INTO doubts (artifact_id, question, status, source)"
+                        " VALUES ($1,$2,'pending','user')",
+                        artifact_id,
+                        question,
+                    )
+                # Toda SPEC deriva da BR de origem (spec F5 §5.6).
+                await conn.execute(
+                    "INSERT INTO spec_edges (parent_id, child_id, type) VALUES ($1,$2,'derives_from')"
+                    " ON CONFLICT DO NOTHING",
+                    artifact_id,
+                    br_id,
+                )
+                await _insert_generated_event(
+                    conn,
+                    demand_id=demand_id,
+                    artifact_id=artifact_id,
+                    kind="spec",
+                    path=path,
+                    sha=sha,
+                    module=module,
+                    feature=feature,
+                    ctx=ctx,
+                )
+
+            await _insert_spec_edges(
+                conn,
+                edges=payload.get("edges") or [],
+                feature_to_id=feature_to_id,
+                demand_id=demand_id,
+            )
+
+    rows = await _find_specs_of_br(ctx.pool, br_id, demand_id)
+    return await _report_from_rows(ctx, rows, created=True, usage=usage)
+
+
+async def _insert_spec_edges(
+    conn: Any,
+    *,
+    edges: Sequence[Any],
+    feature_to_id: Mapping[str, str],
+    demand_id: str,
+) -> None:
+    """Grava as arestas do grafo devolvido pelo modelo (spec F5 §5.6).
+
+    Aresta não resolvida **não** é gravada e gera o evento `spec_edge_unresolved`
+    (D7): perder uma aresta é recuperável, perder a SPEC inteira não.
+    """
+    for raw in edges:
+        edge = raw if isinstance(raw, Mapping) else {}
+        edge_type = str(edge.get("type") or "")
+        if edge_type == "derives_from":
+            continue  # criada pelo servidor para toda SPEC
+        parent_feature = str(edge.get("parentFeature") or "")
+        child_feature = str(edge.get("childFeature") or "")
+        parent_id = feature_to_id.get(parent_feature)
+        child_id = feature_to_id.get(child_feature)
+        if parent_id is None:
+            parent_id = await _existing_spec_id(conn, parent_feature)
+        if child_id is None:
+            child_id = await _existing_spec_id(conn, child_feature)
+        if parent_id is None or child_id is None:
+            await conn.execute(
+                "INSERT INTO events (demand_id, type, payload) VALUES ($1,'spec_edge_unresolved',$2::jsonb)",
+                demand_id,
+                json.dumps(
+                    {
+                        "parentFeature": parent_feature,
+                        "childFeature": child_feature,
+                        "type": edge_type,
+                        "reason": "not_resolved",
+                    }
+                ),
+            )
+            continue
+        await conn.execute(
+            "INSERT INTO spec_edges (parent_id, child_id, type) VALUES ($1,$2,$3)"
+            " ON CONFLICT DO NOTHING",
+            parent_id,
+            child_id,
+            edge_type,
+        )
+
+
+async def _existing_spec_id(conn: Any, value: str) -> str | None:
+    """Resolve um valor como id de SPEC já existente no banco."""
+    if not value:
+        return None
+    return await conn.fetchval(
+        "SELECT id FROM artifacts WHERE id = $1 AND kind = 'spec'", value
+    )
+
+
+async def _insert_generated_event(
+    conn: Any,
+    *,
+    demand_id: str,
+    artifact_id: str,
+    kind: str,
+    path: str,
+    sha: str,
+    module: str,
+    feature: str,
+    ctx: GenerationContext,
+) -> None:
+    """Registra o evento `artifact_generated` (spec F5 §5.8)."""
+    payload = {
+        "artifact_id": artifact_id,
+        "kind": kind,
+        "path": path,
+        "sha": sha,
+        "module": module,
+        "feature": feature,
+        "method_docs": [doc.doc_id for doc in ctx.method_context.documents],
+        "repo_hits": len(ctx.repo_context.hits),
+        "degraded": bool(ctx.method_context.degraded or ctx.repo_context.degraded),
+        "degraded_reason": ctx.repo_context.degraded_reason or ctx.method_context.degraded_reason,
+    }
+    await conn.execute(
+        "INSERT INTO events (demand_id, artifact_id, type, payload, actor)"
+        " VALUES ($1,$2,'artifact_generated',$3::jsonb,$4)",
+        demand_id,
+        artifact_id,
+        json.dumps(payload),
+        None,
+    )
+
+
+async def _call_model(
+    client: Any,
+    *,
+    schema: Mapping[str, Any],
+    system: str,
+    user: str,
+    stage: str,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Chama o modelo com structured outputs e devolve (payload, usage).
+
+    `stop_reason` é obrigatório antes de ler o conteúdo: `max_tokens` significa
+    texto truncado (schema inválido) e `refusal` é recusa — ambos são
+    `LLMUnavailable`.
+    """
+    try:
+        async with client.messages.stream(
+            model=model_name(),
+            max_tokens=MAX_TOKENS,
+            thinking={"type": "adaptive"},
+            output_config={
+                "effort": "high",
+                "format": {"type": "json_schema", "schema": dict(schema)},
+            },
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        ) as stream:
+            final = await stream.get_final_message()
+    except LLMUnavailable:
+        raise
+    except anthropic.AnthropicError as exc:
+        raise LLMUnavailable(f"Claude API indisponível: {exc}", stage=stage) from exc
+    except Exception as exc:  # timeout, proxy fora, rede
+        raise LLMUnavailable(f"Claude API indisponível: {exc}", stage=stage) from exc
+
+    stop_reason = getattr(final, "stop_reason", None)
+    if stop_reason == "max_tokens":
+        raise LLMUnavailable("resposta truncada (max_tokens)", stage=stage)
+    if stop_reason == "refusal":
+        details = getattr(final, "stop_details", None)
+        category = getattr(details, "category", None) if details is not None else None
+        raise LLMUnavailable(
+            f"recusa do modelo (categoria={category})", stage=stage, category=category
+        )
+
+    text = _first_text(final)
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise LLMUnavailable(f"resposta fora do schema: {exc}", stage=stage) from exc
+    if not isinstance(payload, dict):
+        raise LLMUnavailable("resposta fora do schema", stage=stage)
+    return payload, _usage_of(final)
+
+
+def _first_text(final: Any) -> str:
+    """Primeiro bloco de texto da resposta (structured outputs garante JSON válido)."""
+    for block in getattr(final, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            return str(getattr(block, "text", ""))
+    raise LLMUnavailable("resposta sem bloco de texto")
+
+
+def _usage_of(final: Any) -> dict[str, int]:
+    """Tokens consumidos na chamada."""
+    usage = getattr(final, "usage", None)
+    return {
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Persistência
+# --------------------------------------------------------------------------- #
+
+
+async def _next_artifact_number(conn: Any, kind: str, prefix: str) -> int:
+    """Próximo número sequencial do kind (`BR-013` -> 13).
+
+    Roda dentro do advisory lock de D2: duas gerações concorrentes não pegam o
+    mesmo número.
+    """
+    rows = await conn.fetch(
+        "SELECT id FROM artifacts WHERE kind = $1 AND id ~ ('^' || $2 || '-[0-9]{3}$')",
+        kind,
+        prefix,
+    )
+    numbers = []
+    for row in rows:
+        try:
+            numbers.append(int(str(row["id"]).split("-", 1)[1]))
+        except (IndexError, ValueError):
+            continue
+    return max(numbers, default=0) + 1
+
+
+async def _next_artifact_id(conn: Any, kind: str, prefix: str) -> str:
+    """Id do próximo artefato do kind — `BR-013`, `SPEC-024`."""
+    return f"{prefix}-{await _next_artifact_number(conn, kind, prefix):03d}"
+
+
+async def _fetch_artifact(pool: Any, artifact_id: str) -> Any:
+    """Lê o artefato persistido."""
+    return await pool.fetchrow(
+        "SELECT id, kind, path, content, status FROM artifacts WHERE id = $1", artifact_id
+    )
+
+
+async def _find_artifact(pool: Any, demand_id: str, kind: str) -> Any | None:
+    """Artefato mais recente da demanda no kind dado (caminho idempotente, D4)."""
+    return await pool.fetchrow(
+        "SELECT id, kind, path, content, status FROM artifacts"
+        " WHERE demand_id = $1 AND kind = $2 ORDER BY created_at DESC LIMIT 1",
+        demand_id,
+        kind,
+    )
+
+
+async def _find_specs_of_br(pool: Any, br_id: str, demand_id: str) -> list[Any]:
+    """SPECs já geradas para a BR (o vínculo é o `createdFrom` do frontmatter)."""
+    rows = await pool.fetch(
+        "SELECT id, kind, path, content, status FROM artifacts"
+        " WHERE demand_id = $1 AND kind = 'spec' ORDER BY created_at",
+        demand_id,
+    )
+    return [
+        row
+        for row in rows
+        if str(parse_frontmatter(row["content"] or "").get("createdFrom") or "") == br_id
+    ]
+
+
+async def _report_from_rows(
+    ctx: GenerationContext,
+    rows: Sequence[Any],
+    *,
+    created: bool,
+    idempotent: bool = False,
+    usage: Mapping[str, int] | None = None,
+) -> GenerationReport:
+    """Monta o relatório da rota a partir dos artefatos persistidos."""
+    artifacts: list[dict[str, Any]] = []
+    doubts_files: list[DoubtsFile] = []
+    edges: dict[tuple[str, str, str], SpecEdge] = {}
+
+    for row in rows:
+        content = row["content"] or ""
+        front = parse_frontmatter(content)
+        doubts_path = str(front.get("doubtsIndex") or "")
+        artifacts.append(
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "path": row["path"],
+                "content": content,
+                "frontmatter": front,
+                "doubts_index_path": doubts_path,
+            }
+        )
+        doubts = await ctx.pool.fetch(
+            "SELECT id, status, source, question, raised_at, resolved_at"
+            " FROM doubts WHERE artifact_id = $1 ORDER BY raised_at, id",
+            row["id"],
+        )
+        doubts_files.append(
+            DoubtsFile(
+                path=doubts_path,
+                content=render_doubts_seed(
+                    row["id"], _doubts_file_status(row["status"]), doubts
+                ),
+            )
+        )
+        for edge in await ctx.pool.fetch(
+            "SELECT parent_id, child_id, type FROM spec_edges"
+            " WHERE parent_id = $1 OR child_id = $1",
+            row["id"],
+        ):
+            key = (edge["parent_id"], edge["child_id"], edge["type"])
+            edges[key] = SpecEdge(*key)
+
+    return GenerationReport(
+        artifacts=tuple(artifacts),
+        doubts_files=tuple(doubts_files),
+        spec_edges=tuple(edges.values()),
+        usage=dict(usage or {}),
+        context=context_summary(ctx),
+        created=created,
+        idempotent=idempotent,
+    )
+
+
+def context_summary(ctx: GenerationContext) -> dict[str, Any]:
+    """Resumo do contexto usado na geração (vai no payload da rota)."""
+    return {
+        "method_docs": [doc.doc_id for doc in ctx.method_context.documents],
+        "repo_hits": len(ctx.repo_context.hits),
+        "repo_corpus_id": ctx.repo_context.corpus_id,
+        "degraded": bool(ctx.method_context.degraded or ctx.repo_context.degraded),
+        "degraded_reason": ctx.repo_context.degraded_reason or ctx.method_context.degraded_reason,
+    }
+
+
+def _doubts_file_status(artifact_status: str) -> str:
+    """Status do arquivo de dúvidas (META-006 §6)."""
+    mapping = {
+        "draft": "draft",
+        "pending": "pending",
+        "on user review": "pending",
+        "on agents review": "pending",
+        "approved": "approved",
+        "stable": "approved",
+    }
+    return mapping.get(artifact_status, "draft")
+
+
+# --------------------------------------------------------------------------- #
+# Erro e reset da demanda
+# --------------------------------------------------------------------------- #
+
+_FALLBACK_DEMAND_TRANSITIONS: dict[str, set[str]] = {
+    "open": {"claimed", "blocked"},
+    "claimed": {"in_progress", "open", "blocked"},
+    "in_progress": {"review", "blocked"},
+    "review": {"in_progress", "merged", "blocked"},
+    "merged": {"done", "blocked"},
+    "done": {"blocked"},
+    "blocked": {"open"},
+}
+
+
+def can_transition(table: str, current: str, target: str) -> bool:
+    """A transição é legal? Usa o lifecycle do F4 quando existe; senão a tabela local."""
+    try:
+        from app.services.lifecycle import can_transition as lifecycle_can_transition
+    except ImportError:
+        lifecycle_can_transition = None
+    if lifecycle_can_transition is not None:
+        try:
+            return bool(lifecycle_can_transition(table, current, target))
+        except Exception:
+            return False
+    return target in _FALLBACK_DEMAND_TRANSITIONS.get(current, set())
+
+
+async def _reset_demand(pool: Any, demand_id: str, *, stage: str, error: Exception) -> bool:
+    """Devolve a demanda para `open` quando a transição é legal (spec F5 §5.9).
+
+    `in_progress` **permanece** `in_progress`: `in_progress -> open` não é
+    transição legal na tabela §9.1 e o servidor nunca adivinha (invariante 2).
+    Registra o evento `generation_failed` em qualquer caso.
+    """
+    reason = "invalid_artifact_path" if isinstance(error, InvalidArtifactPath) else "llm_unavailable"
+    row = await pool.fetchrow("SELECT status FROM demands WHERE id = $1", demand_id)
+    current = str(row["status"]) if row is not None else ""
+    reset = False
+
+    if current == "claimed" and can_transition("demand", current, "open"):
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await _apply_demand_open(conn, demand_id, current)
+                reset = True
+
+    await pool.execute(
+        "INSERT INTO events (demand_id, type, payload) VALUES ($1,'generation_failed',$2::jsonb)",
+        demand_id,
+        json.dumps(
+            {
+                "stage": stage,
+                "error_type": type(error).__name__,
+                "message": str(error),
+                "reason": reason,
+                "reset": reset,
+            }
+        ),
+    )
+    return reset
+
+
+async def _apply_demand_open(conn: Any, demand_id: str, current: str) -> None:
+    """Aplica `claimed -> open` pelo lifecycle do F4, com fallback local."""
+    try:
+        from app.services.lifecycle import apply_demand_transition
+    except ImportError:
+        apply_demand_transition = None
+    if apply_demand_transition is not None:
+        import inspect
+
+        parameters = inspect.signature(apply_demand_transition).parameters
+        if "demand_id" in parameters and "target" in parameters:
+            await apply_demand_transition(
+                conn, demand_id=demand_id, target="open", actor_id=None
+            )
+        else:
+            await apply_demand_transition(conn, demand_id, "open")
+        return
+    await conn.execute(
+        "UPDATE demands SET status = 'open', updated_at = now() WHERE id = $1 AND status = $2",
+        demand_id,
+        current,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Utilidades
+# --------------------------------------------------------------------------- #
+
+_OPEN_QUESTIONS_RE = re.compile(r"^#{1,6}\s*Open Questions\s*$", re.IGNORECASE | re.MULTILINE)
+_AC_RE = re.compile(r"AC-\d{3}")
+
+
+def extract_open_questions(body: str) -> list[str]:
+    """Linhas da seção `Open Questions` do corpo do artefato (META-006 §5)."""
+    match = _OPEN_QUESTIONS_RE.search(body or "")
+    if not match:
+        return []
+    questions: list[str] = []
+    for line in body[match.end() :].splitlines():
+        if line.startswith("#"):
+            break
+        stripped = line.strip()
+        if stripped.startswith(("- ", "* ")):
+            question = stripped[2:].strip()
+            if question:
+                questions.append(question)
+    return questions
+
+
+def extract_acceptance_criteria(content: str) -> list[str]:
+    """Ids de AC presentes no markdown da BR (`AC-001`)."""
+    seen: list[str] = []
+    for ac in _AC_RE.findall(content or ""):
+        if ac not in seen:
+            seen.append(ac)
+    return seen
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    """Normaliza Demand/Artifact (dataclass), dict ou asyncpg.Record em mapping."""
+    if isinstance(value, Mapping):
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if hasattr(value, "keys"):
+        return {key: value[key] for key in value.keys()}
+    if hasattr(value, "__dict__"):
+        return dict(vars(value))
+    raise TypeError(f"não sei ler {type(value)!r}")
+
