@@ -223,7 +223,7 @@ async def require_user(request: Request) -> User:
     return user
 
 
-def require_scope(scope: str) -> Callable[..., Any]:
+def require_scope(scope: str) -> Callable[..., Token]:
     """Dependência: exige o escopo. Token sem o escopo → 403."""
 
     async def dependency(request: Request) -> Token:

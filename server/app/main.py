@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, Request
