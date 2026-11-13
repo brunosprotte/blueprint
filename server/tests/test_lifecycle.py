@@ -321,3 +321,121 @@ def _payload(value) -> dict:
     import json
 
     return json.loads(value) if isinstance(value, str) else value
+
+
+class _Request:
+    headers: dict = {}
+
+
+# --------------------------------------------------------------------------
+# Criação e consulta de demanda
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_create_demand_open_and_event(pool):
+    """`POST /api/demands` cria a demanda `open` e grava `demand.created`."""
+    from app.routers import demands as demands_router
+
+    user_id = await new_user(pool)
+    await new_repo(pool)
+
+    response = await demands_router.create_demand(
+        request=_Request(),
+        body=demands_router.CreateDemandBody(
+            repo="acme/app", module="login", title="login", body="preciso de login"
+        ),
+        user=sys.modules["app.auth"].User(id=user_id),
+    )
+
+    assert response["status"] == "open"
+    assert response["repo"] == "acme/app"
+    assert response["claimed_by"] is None
+
+    event = await pool.fetchrow(
+        "SELECT * FROM events WHERE demand_id = $1 AND type = 'demand.created'",
+        uuid.UUID(response["id"]),
+    )
+    assert event is not None
+
+
+@pytest.mark.asyncio
+async def test_create_demand_empty_body_400(pool):
+    """Body vazio → 400 `empty_body`."""
+    from app.routers import demands as demands_router
+
+    user_id = await new_user(pool)
+    await new_repo(pool)
+
+    response = await demands_router.create_demand(
+        request=_Request(),
+        body=demands_router.CreateDemandBody(
+            repo="acme/app", module="login", title="login", body="   "
+        ),
+        user=sys.modules["app.auth"].User(id=user_id),
+    )
+
+    assert response.status_code == 400
+    assert b'"empty_body"' in response.body
+
+
+@pytest.mark.asyncio
+async def test_start_demand_by_non_owner_403(pool):
+    """`start` por quem não é o dono do claim → 403 `not_claim_owner`."""
+    from app.services import claims as claims_service
+    from app.services import demands as demands_service
+
+    owner_id = await new_user(pool)
+    other_id = await new_user(pool)
+    repo_id = await new_repo(pool)
+    demand_id = await _new_demand(pool, repo_id, owner_id)
+    await claims_service.claim_next(pool, repo="acme/app", user_id=owner_id)
+
+    with pytest.raises(ApiError) as excinfo:
+        await demands_service.start_demand(pool, demand_id=demand_id, actor_id=other_id)
+
+    assert excinfo.value.code == "not_claim_owner"
+    assert excinfo.value.status == 403
+
+    row = await pool.fetchrow("SELECT status FROM demands WHERE id = $1", uuid.UUID(demand_id))
+    assert row["status"] == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_start_demand_by_owner(pool):
+    """`claimed → in_progress` pelo dono do claim."""
+    from app.services import claims as claims_service
+    from app.services import demands as demands_service
+
+    owner_id = await new_user(pool)
+    repo_id = await new_repo(pool)
+    demand_id = await _new_demand(pool, repo_id, owner_id)
+    await claims_service.claim_next(pool, repo="acme/app", user_id=owner_id)
+
+    started = await demands_service.start_demand(
+        pool, demand_id=demand_id, actor_id=owner_id
+    )
+
+    assert started["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_get_demand_carries_artifacts_and_events(pool):
+    """`GET /api/demands/{id}` devolve a demanda + artefatos + eventos."""
+    from app.services import demands as demands_service
+
+    user_id = await new_user(pool)
+    repo_id = await new_repo(pool)
+    demand_id = await _new_demand(pool, repo_id, user_id)
+    await pool.execute(
+        """
+        INSERT INTO artifacts (id, demand_id, repo_id, kind, path, status)
+        VALUES ('BR-009', $1, $2, 'br', 'docs/BR/login/login.md', 'draft')
+        """,
+        uuid.UUID(demand_id),
+        uuid.UUID(repo_id),
+    )
+
+    demand = await demands_service.get_demand(pool, demand_id)
+
+    assert demand["id"] == demand_id
+    assert [artifact["id"] for artifact in demand["artifacts"]] == ["BR-009"]
+    assert isinstance(demand["events"], list)

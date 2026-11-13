@@ -607,3 +607,74 @@ async def test_stabilize_ri_required_409(pool):
 
     assert excinfo.value.code == "ri_required"
     assert excinfo.value.status == 409
+
+
+# --------------------------------------------------------------------------
+# GET /api/artifacts/pending — a rota que o kit (F8) consome
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_pending_route_lists_artifacts(pool):
+    """`GET /api/artifacts/pending` devolve os artefatos não estáveis do repo."""
+    from app.routers import artifacts as artifacts_router
+
+    await new_repo(pool)
+    await artifacts_service.sync(
+        pool,
+        repo="acme/app",
+        docs=[{"path": "docs/BR/login/login.md", "content": BR_CONTENT}],
+        actor_id=None,
+    )
+
+    class _Request:
+        headers: dict = {}
+
+    response = await artifacts_router.list_pending(
+        request=_Request(),
+        repo="acme/app",
+        demand=None,
+        user=sys.modules["app.auth"].User(id=str(uuid.uuid4())),
+    )
+
+    assert len(response["artifacts"]) == 1
+    assert response["artifacts"][0]["id"] == "BR-001"
+    assert response["artifacts"][0]["status"] == "draft"
+    assert "# Login" in response["artifacts"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_pending_route_requires_repo(pool):
+    """`repo` ausente → 400 `invalid_request` (spec §4.3)."""
+    from app.routers import artifacts as artifacts_router
+
+    class _Request:
+        headers: dict = {}
+
+    response = await artifacts_router.list_pending(
+        request=_Request(),
+        repo=None,
+        demand=None,
+        user=sys.modules["app.auth"].User(id=str(uuid.uuid4())),
+    )
+
+    assert response.status_code == 400
+    assert b'"invalid_request"' in response.body
+
+
+@pytest.mark.asyncio
+async def test_pending_route_empty_is_200(pool):
+    """Fila vazia → 200 com `artifacts: []` (não 404)."""
+    from app.routers import artifacts as artifacts_router
+
+    await new_repo(pool)
+
+    class _Request:
+        headers: dict = {}
+
+    response = await artifacts_router.list_pending(
+        request=_Request(),
+        repo="acme/app",
+        demand=None,
+        user=sys.modules["app.auth"].User(id=str(uuid.uuid4())),
+    )
+
+    assert response == {"artifacts": []}
