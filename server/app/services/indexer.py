@@ -183,19 +183,23 @@ def _as_list(value: Any) -> list:
 async def index_method() -> int:
     """Reindexa o corpus `method` (docs/) e devolve o número de chunks inseridos.
 
+    O corpus `method` tem **um dono só: o F7**. O F3 delega a reindexação para
+    cá (`services.method.index_chunks` → cá; Contrato Comum §7.6).
+
     O corpus vem do `MethodIndex` do F3 — o mesmo índice que o linter (F2) e a
-    rota de método (F3) usam. O F7 não mantém varredura própria de `docs/`.
+    rota de método (F3) usam, e a mesma lista de diretórios excluídos
+    (`docs/implementation-artifacts/` — META-006 §9: catálogo de dúvidas não é
+    conhecimento do método). O F7 não mantém varredura própria de `docs/`.
 
     Gate: o hash do corpus **e** a existência das linhas. O hash sozinho não
-    basta — o indexador provisório do F3 (`services.method.index_chunks`) também
-    escreve no corpus `method` e apaga as linhas do F7; sem a checagem de linhas
-    o índice do F7 ficaria vazio depois de um sync do F3.
+    basta — quem escreveu no corpus `method` por fora (o indexador antigo do
+    F3, `services.method.index_chunks`) apaga as linhas do F7; sem a checagem
+    de linhas o índice do F7 ficaria vazio depois de um sync.
     """
-    from app.config import settings
     from app import db
+    from app.config import settings
 
     index = _method_index(Path(settings.repo_root))
-    index.refresh()
     documents = index.all()
     content_hash = index.corpus_hash
 
@@ -389,15 +393,25 @@ _method_index_instance: Any = None
 
 
 def _method_index(root: Path) -> Any:
-    """Instância compartilhada do `MethodIndex` do F3 (corpus do método).
+    """Índice do corpus do método — o do F3, sempre (Contrato Comum §7.6).
 
-    O F3 reconstrói o índice a partir do git; o F7 só consome.
+    O F3 expõe o índice compartilhado (`get_method_index`), usado pela API e pelo
+    F5 — o F7 usa a mesma instância, para que o corpus lido seja um só. Sem o
+    acessor (F3 anterior ao merge), o F7 monta o `MethodIndex`: o mesmo corpus,
+    a mesma lista de diretórios excluídos.
     """
     global _method_index_instance
-    from app.services.method import MethodIndex
+    from app.services import method as method_service
+
+    getter = getattr(method_service, "get_method_index", None)
+    if getter is not None:
+        index, _changed = getter(root)
+        return index
 
     if _method_index_instance is None or _method_index_instance.root != root:
-        _method_index_instance = MethodIndex(root)
+        _method_index_instance = method_service.MethodIndex(root)
+    else:
+        _method_index_instance.refresh()
     return _method_index_instance
 
 
