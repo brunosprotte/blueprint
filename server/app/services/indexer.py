@@ -8,10 +8,14 @@ Postgres. Dois corpora, nunca misturados:
 
 Invariante: toda query SQL carrega `WHERE corpus_id = $1` com o corpus exato do
 pedido. Não existe `LIKE`, `IN` com dois valores, nem fallback de corpus vazio.
+
+**Corpus do método = o do F3.** O F7 não mantém varredura própria de `docs/`:
+lê os documentos do `MethodIndex` do F3 (`app.services.method`), que é o mesmo
+índice que o linter (F2) e a rota de método (F3) usam — um corpus só, sem índice
+divergente (Contrato Comum §7.6).
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
@@ -61,6 +65,12 @@ SELECT payload->>'content_hash' AS content_hash
 _INSERT_METHOD_EVENT_SQL = """
 INSERT INTO events (demand_id, artifact_id, type, payload, actor)
 VALUES (NULL, NULL, 'method_corpus_indexed', $1::jsonb, NULL)
+"""
+
+#: Linhas do corpus `method` escritas pelo F7 (`source_ref` preenchido). As linhas do
+#: indexador provisório do F3 (`source_ref = ''`) não contam.
+_COUNT_METHOD_ROWS_SQL = """
+SELECT count(*) FROM chunks WHERE corpus_id = $1 AND source_ref <> ''
 """
 
 
@@ -171,54 +181,59 @@ def _as_list(value: Any) -> list:
 
 
 async def index_method() -> int:
-    """Reindexa o corpus `method` (docs/). Retorna o número de chunks inseridos.
+    """Reindexa o corpus `method` (docs/) e devolve o número de chunks inseridos.
 
-    Se o hash do corpus não mudou, retorna 0 sem tocar no índice.
+    O corpus vem do `MethodIndex` do F3 — o mesmo índice que o linter (F2) e a
+    rota de método (F3) usam. O F7 não mantém varredura própria de `docs/`.
+
+    Gate: o hash do corpus **e** a existência das linhas. O hash sozinho não
+    basta — o indexador provisório do F3 (`services.method.index_chunks`) também
+    escreve no corpus `method` e apaga as linhas do F7; sem a checagem de linhas
+    o índice do F7 ficaria vazio depois de um sync do F3.
     """
     from app.config import settings
-    from app.db import get_pool
+    from app import db
 
-    root = Path(settings.repo_root) / "docs"
-    files = sorted(root.rglob("*.md")) if root.is_dir() else []
+    index = _method_index(Path(settings.repo_root))
+    index.refresh()
+    documents = index.all()
+    content_hash = index.corpus_hash
 
-    digest = hashlib.sha256()
-    contents: list[tuple[str, str]] = []
-    for path in files:
-        rel = path.relative_to(root).as_posix()
-        content = path.read_text(encoding="utf-8")
-        contents.append((rel, content))
-        digest.update(f"{rel}:{hashlib.sha256(content.encode('utf-8')).hexdigest()}\n".encode())
-    content_hash = digest.hexdigest()
-
-    pool = await get_pool()
+    pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(_SELECT_METHOD_HASH_SQL)
-            if row is not None and row["content_hash"] == content_hash:
+            indexed = await conn.fetchval(_COUNT_METHOD_ROWS_SQL, METHOD_CORPUS)
+            if row is not None and row["content_hash"] == content_hash and indexed:
                 return 0
             await conn.execute("DELETE FROM chunks WHERE corpus_id = $1", METHOD_CORPUS)
-            count = 0
-            for rel, content in contents:
-                for chunk in chunk_markdown(content, []):
-                    chunk.source_kind = METHOD_CORPUS
-                    chunk.corpus_id = METHOD_CORPUS
-                    await conn.execute(
-                        _INSERT_CHUNK_SQL,
-                        chunk.artifact_id,
-                        chunk.demand_id,
-                        chunk.source_kind,
-                        chunk.heading,
-                        chunk.text,
-                        chunk.token_count,
-                        chunk.corpus_id,
-                        rel,
+            rows: list[tuple] = []
+            for document in documents:
+                source_ref = _relative_to_docs(document.path)
+                for chunk in chunk_markdown(document.content, []):
+                    rows.append(
+                        (
+                            None,
+                            None,
+                            METHOD_CORPUS,
+                            chunk.heading,
+                            chunk.text,
+                            chunk.token_count,
+                            METHOD_CORPUS,
+                            source_ref,
+                        )
                     )
-                    count += 1
+            if rows:
+                await conn.executemany(_INSERT_CHUNK_SQL, rows)
             payload = json.dumps(
-                {"content_hash": content_hash, "chunk_count": count, "root": "docs"}
+                {
+                    "content_hash": content_hash,
+                    "chunk_count": len(rows),
+                    "root": "docs",
+                }
             )
             await conn.execute(_INSERT_METHOD_EVENT_SQL, payload)
-    return count
+    return len(rows)
 
 
 async def index_artifact(doc: "ArtifactDoc", corpus_id: str) -> int:
@@ -226,13 +241,13 @@ async def index_artifact(doc: "ArtifactDoc", corpus_id: str) -> int:
 
     O `corpus_id` é sempre o do chamador — nunca deduzido.
     """
-    from app.db import get_pool
+    from app import db
 
     source_kind = source_kind_for(doc.path, doc.kind)
     if source_kind is None:
         return 0
 
-    pool = await get_pool()
+    pool = await db.get_pool()
     artifact_id: str | None = None
     demand_id: str | None = None
     repo_id = _uuid(doc.repo_id)
@@ -280,14 +295,14 @@ async def index_artifact(doc: "ArtifactDoc", corpus_id: str) -> int:
 
 async def index_commit(commit: "Commit") -> int:
     """Indexa um commit reportado no corpus `repo:<uuid>` do próprio commit."""
-    from app.db import get_pool
+    from app import db
 
     corpus_id = f"repo:{commit.repo_id}"
     source_ref = commit.sha
     text = (commit.message or "") + "\n\n" + "\n".join(_as_list(commit.files))
     chunks = chunk_markdown(text, [f"commit {commit.sha[:7]}"])
 
-    pool = await get_pool()
+    pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -317,9 +332,9 @@ async def index_review(review: "Review") -> int:
 
     Um chunk por achado; review sem achados vira um chunk de resumo.
     """
-    from app.db import get_pool
+    from app import db
 
-    pool = await get_pool()
+    pool = await db.get_pool()
     commit = await pool.fetchrow(
         "SELECT repo_id, sha FROM commits WHERE id = $1", _uuid(review.commit_id)
     )
@@ -370,13 +385,41 @@ async def index_review(review: "Review") -> int:
 
 
 _last_method_check: float = float("-inf")
+_method_index_instance: Any = None
+
+
+def _method_index(root: Path) -> Any:
+    """Instância compartilhada do `MethodIndex` do F3 (corpus do método).
+
+    O F3 reconstrói o índice a partir do git; o F7 só consome.
+    """
+    global _method_index_instance
+    from app.services.method import MethodIndex
+
+    if _method_index_instance is None or _method_index_instance.root != root:
+        _method_index_instance = MethodIndex(root)
+    return _method_index_instance
+
+
+def _relative_to_docs(path: str) -> str:
+    """Path do documento relativo a `docs/` (posix) — é o `source_ref` do método."""
+    normalized = str(path).replace("\\", "/")
+    return normalized[len("docs/") :] if normalized.startswith("docs/") else normalized
 
 
 async def ensure_method_indexed() -> int:
-    """Indexa o corpus `method` se o conteúdo de `docs/` mudou (cache de 60 s)."""
+    """Garante o índice do corpus `method` antes de uma busca.
+
+    O TTL de 60 s só evita reler `docs/`: a checagem das linhas no banco é sempre
+    feita, porque o índice pode ter sido apagado por outro escritor (o indexador
+    provisório do F3) ou pela truncagem do banco de teste.
+    """
     global _last_method_check
-    now = time.monotonic()
-    if now - _last_method_check < METHOD_INDEX_TTL_SECONDS:
+    from app import db
+
+    pool = await db.get_pool()
+    indexed = await pool.fetchval(_COUNT_METHOD_ROWS_SQL, METHOD_CORPUS)
+    if indexed and time.monotonic() - _last_method_check < METHOD_INDEX_TTL_SECONDS:
         return 0
     count = await index_method()
     # Timestamp só depois do sucesso: se a indexação falhar, a próxima busca tenta de novo.
