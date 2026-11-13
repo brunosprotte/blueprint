@@ -1,0 +1,279 @@
+#!/usr/bin/env sh
+# Pre-push hook do kit SDD (fase F9).
+#
+# Gate de push: lint deterministico dos artefatos tocados + review do diff contra
+# a SPEC da demanda corrente. So um achado `blocking` aborta o push; falha de
+# infraestrutura (sem token, sem demanda, LLM fora, rede fora) nunca bloqueia
+# (design master 19).
+#
+# POSIX sh de proposito: o git executa hooks via `sh` (Git for Windows usa o sh
+# do MSYS) e bashisms quebram o hook.
+
+set -u
+
+PREFIX='[sdd]'
+ZERO_SHA='0000000000000000000000000000000000000000'
+
+log() {
+    printf '%s %s\n' "$PREFIX" "$*" >&2
+}
+
+REMOTE_NAME="${1:-}"
+REMOTE_URL="${2:-}"
+HOOK_DIR="$(dirname "$0")"
+
+# ---------------------------------------------------------------------------
+# 0. stdin: uma linha por ref -> "<local ref> <local sha> <remote ref> <remote sha>"
+# ---------------------------------------------------------------------------
+# CR: alguns ambientes entregam as refs com CRLF; sem remover, o sha remoto
+# viraria "000...0\r" e uma branch nova seria tratada como branch existente.
+CR="$(printf '\r')"
+LOCAL_SHA=''
+REMOTE_SHA=''
+while read -r _lref _lsha _rref _rsha; do
+    _lsha="${_lsha-}"
+    _rsha="${_rsha-}"
+    _lsha="${_lsha%"$CR"}"
+    _rsha="${_rsha%"$CR"}"
+    [ -n "$_lsha" ] || continue
+    if [ "$_lsha" != "$_rsha" ]; then
+        LOCAL_SHA="$_lsha"
+        REMOTE_SHA="$_rsha"
+        break
+    fi
+done
+
+# Nada a enviar.
+[ -n "$LOCAL_SHA" ] || exit 0
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$REPO_ROOT" ] || exit 0
+
+# ---------------------------------------------------------------------------
+# 1. resolucao de kit / interpretador / token / demanda
+# ---------------------------------------------------------------------------
+KIT_DIR=''
+for _cand in "${SDD_KIT_DIR:-}" "$REPO_ROOT/kit" "$REPO_ROOT/plugin/kit" "$HOOK_DIR/../kit"; do
+    [ -n "$_cand" ] || continue
+    if [ -f "$_cand/sdd.py" ]; then
+        KIT_DIR="$_cand"
+        break
+    fi
+done
+
+if [ -z "$KIT_DIR" ]; then
+    log "kit SDD nao encontrado — gate ignorado."
+    exit 0
+fi
+
+cd "$REPO_ROOT" || exit 0
+
+PY=''
+PY_EXTRA=''
+if [ -n "${SDD_PYTHON:-}" ]; then
+    PY="$SDD_PYTHON"
+elif command -v python3 >/dev/null 2>&1; then
+    PY='python3'
+elif command -v python >/dev/null 2>&1; then
+    PY='python'
+elif command -v py >/dev/null 2>&1; then
+    PY='py'
+    PY_EXTRA='-3'
+fi
+
+if [ -z "$PY" ]; then
+    log "interpretador Python nao encontrado — gate ignorado."
+    exit 0
+fi
+
+run_py() {
+    "$PY" $PY_EXTRA "$@"
+}
+
+# config.local.json -> token (alias sdd_token) e url
+config_value() {
+    [ -f "$1" ] || return 0
+    run_py -c 'import json,sys
+try:
+    d=json.load(open(sys.argv[1],encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(d,dict):
+    raise SystemExit(0)
+k=sys.argv[2]
+v=d.get(k)
+if v is None and k=="token":
+    v=d.get("sdd_token")
+if isinstance(v,str):
+    sys.stdout.write(v)
+' "$1" "$2"
+}
+
+TOKEN="${SDD_TOKEN:-}"
+if [ -z "$TOKEN" ]; then
+    TOKEN="$(config_value "$KIT_DIR/config.local.json" token)"
+fi
+
+if [ -z "$TOKEN" ]; then
+    log "sem token configurado (SDD_TOKEN ou kit/config.local.json) — revisão ignorada."
+    exit 0
+fi
+export SDD_TOKEN="$TOKEN"
+
+if [ -z "${SDD_URL:-}" ]; then
+    _url="$(config_value "$KIT_DIR/config.local.json" url)"
+    [ -n "$_url" ] && export SDD_URL="$_url"
+fi
+
+DEMAND_ID=''
+if [ -f "$KIT_DIR/state.json" ]; then
+    DEMAND_ID="$(run_py -c 'import json,sys
+try:
+    d=json.load(open(sys.argv[1],encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(d,dict):
+    raise SystemExit(0)
+v=d.get("demand_id")
+if not v:
+    dem=d.get("demand")
+    if isinstance(dem,dict):
+        v=dem.get("id")
+if not v:
+    v=d.get("id")
+if isinstance(v,str):
+    sys.stdout.write(v)
+' "$KIT_DIR/state.json")"
+fi
+
+if [ -z "$DEMAND_ID" ]; then
+    log "sem demanda corrente (kit/state.json) — só o lint roda."
+fi
+
+# ---------------------------------------------------------------------------
+# 2. diff deterministico (sem rede)
+# ---------------------------------------------------------------------------
+if [ "$REMOTE_SHA" != "$ZERO_SHA" ]; then
+    BASE="$REMOTE_SHA"
+else
+    BASE="$(git merge-base "$LOCAL_SHA" "refs/remotes/$REMOTE_NAME/HEAD" 2>/dev/null || true)"
+    if [ -z "$BASE" ]; then
+        BASE="$(git rev-parse --verify --quiet "$LOCAL_SHA^" 2>/dev/null || true)"
+    fi
+fi
+
+if [ -n "$BASE" ]; then
+    FILES="$(git diff --no-color --name-only "$BASE..$LOCAL_SHA" 2>/dev/null || true)"
+else
+    FILES="$(git show --no-color --name-only --format= "$LOCAL_SHA" 2>/dev/null || true)"
+fi
+
+# Artefatos BR/SPEC tocados no diff.
+ARTIFACTS="$(
+    printf '%s\n' "$FILES" | while IFS= read -r _f; do
+        [ -n "$_f" ] || continue
+        case "$_f" in
+            docs/BR/*|docs/SPEC/*) ;;
+            *) continue ;;
+        esac
+        [ -f "$_f" ] || continue
+        if [ ! -r "$_f" ]; then
+            log "arquivo ilegível — ignorado: $_f"
+            continue
+        fi
+        printf '%s\n' "$_f"
+    done
+)"
+
+# ---------------------------------------------------------------------------
+# 3. lint deterministico (sem LLM)
+# ---------------------------------------------------------------------------
+if [ -n "$ARTIFACTS" ]; then
+    OLDIFS="$IFS"
+    IFS='
+'
+    # shellcheck disable=SC2086
+    set -- $ARTIFACTS
+    IFS="$OLDIFS"
+    LINT_OUT="$("$PY" $PY_EXTRA "$KIT_DIR/sdd.py" lint "$@")"
+    LINT_RC=$?
+    printf '%s' "$LINT_OUT" | run_py -c 'import json,sys
+raw=sys.stdin.read()
+try:
+    d=json.loads(raw) if raw.strip() else {}
+except Exception:
+    d={}
+if not isinstance(d,dict):
+    d={}
+s=d.get("summary") if isinstance(d.get("summary"),dict) else {}
+print("lint: %d erro, %d aviso" % (int(s.get("error") or 0), int(s.get("warning") or 0)))
+for f in d.get("findings") or []:
+    if not isinstance(f,dict) or f.get("severity")!="error":
+        continue
+    loc=f.get("path") or ""
+    if f.get("line"):
+        loc="%s:%s" % (loc, f.get("line"))
+    print("lint erro: [%s] %s%s" % (f.get("rule") or "?", f.get("message") or "", (" ("+loc+")") if loc else ""))
+' >&2
+    if [ "$LINT_RC" -eq 1 ]; then
+        log "push abortado (lint com erro). Use 'git push --no-verify' para ignorar."
+        exit 1
+    elif [ "$LINT_RC" -ne 0 ]; then
+        log "lint falhou (exit $LINT_RC) — revisão ignorada."
+    fi
+else
+    log "lint: nenhum artefato BR/SPEC no diff."
+fi
+
+# ---------------------------------------------------------------------------
+# 4. report do commit (POST /api/commits)
+# ---------------------------------------------------------------------------
+if [ -n "$DEMAND_ID" ]; then
+    "$PY" $PY_EXTRA "$KIT_DIR/sdd.py" report "$LOCAL_SHA" >/dev/null
+    REPORT_RC=$?
+    if [ "$REPORT_RC" -ne 0 ]; then
+        log "report do commit falhou (exit $REPORT_RC) — revisão ignorada."
+    fi
+
+    # -----------------------------------------------------------------------
+    # 5. review do diff contra a SPEC (POST /api/reviews)
+    # -----------------------------------------------------------------------
+    if [ -f "$KIT_DIR/reviewer.py" ]; then
+        REVIEW_OUT="$("$PY" $PY_EXTRA "$KIT_DIR/reviewer.py" --demand "$DEMAND_ID" --sha "$LOCAL_SHA" --repo-root "$REPO_ROOT" --json)"
+        REVIEW_RC=$?
+        printf '%s' "$REVIEW_OUT" | run_py -c 'import json,sys
+raw=sys.stdin.read()
+try:
+    d=json.loads(raw) if raw.strip() else {}
+except Exception:
+    d={}
+if not isinstance(d,dict):
+    d={}
+verdict=d.get("verdict") or "pending"
+fs=[f for f in (d.get("findings") or []) if isinstance(f,dict)]
+blocking=[f for f in fs if f.get("severity")=="blocking"]
+sugg=[f for f in fs if f.get("severity")!="blocking"]
+if blocking:
+    n=len(blocking)
+    print("review: %s — %d achado%s bloqueante%s" % (verdict, n, "" if n==1 else "s", "" if n==1 else "s"))
+elif sugg:
+    n=len(sugg)
+    print("review: %s — %d achado%s sugerido%s" % (verdict, n, "" if n==1 else "s", "" if n==1 else "s"))
+else:
+    print("review: %s" % verdict)
+for f in blocking+sugg:
+    ref=f.get("ac") or ""
+    print("review achado: [%s] %s%s" % (f.get("severity") or "suggestion", f.get("title") or "", (" ("+ref+")") if ref else ""))
+' >&2
+        if [ "$REVIEW_RC" -eq 1 ]; then
+            log "push abortado (veredito blocking). Use 'git push --no-verify' para ignorar."
+            exit 1
+        elif [ "$REVIEW_RC" -ne 0 ]; then
+            log "revisão falhou (exit $REVIEW_RC) — push liberado."
+        fi
+    else
+        log "reviewer.py ausente — revisão ignorada."
+    fi
+fi
+
+exit 0
