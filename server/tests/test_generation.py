@@ -1,182 +1,23 @@
 """Testes da fase F5 — geração de BR e SPEC.
 
 Sem chamada real à API: o `GenerationContext.client` recebe um fake que devolve o
-JSON do schema. O banco de teste é o do F5 (`f5_test`), separado do banco de dev.
+JSON do schema. As rotas HTTP usam a fixture `client` do conftest do F1, com o
+cliente Anthropic trocado por `monkeypatch` em `generator.build_client`.
 
-Os testes que dependem do core do F1 (auth, `app.db`, `app.main`) ficam
-`@pytest.mark.skip(reason="F1 pendente")` — o núcleo do serviço e do handler é
-testado direto, sem o core.
+O banco é o de teste do F1 (`conftest.pool`), separado do banco de dev.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import sys
-from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, AsyncIterator
-from urllib.parse import urlsplit, urlunsplit
+from typing import Any
 
-# `server/` no sys.path: o pacote `app` vive lá (mesma convenção do pyproject do F1).
-_SERVER = Path(__file__).resolve().parents[1]
-if str(_SERVER) not in sys.path:
-    sys.path.insert(0, str(_SERVER))
+import pytest
 
-import asyncpg  # noqa: E402
-import pytest  # noqa: E402
-import pytest_asyncio  # noqa: E402
-
-from app.routers import generation  # noqa: E402
-from app.services import generator  # noqa: E402
-
-F5_DSN = os.environ.get(
-    "SDD_F5_TEST_DATABASE_URL", "postgresql://sdd:sdd@localhost:5432/f5_test"
-)
-
-# DDL mínimo canônico (design master §8) usado enquanto o F1 não entrega a
-# migration `001_bootstrap.sql` neste worktree. Quando ela existir, ela é usada.
-_FALLBACK_DDL = """
-CREATE TABLE IF NOT EXISTS users (
-    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    github_id   bigint NOT NULL UNIQUE,
-    login       text NOT NULL,
-    email       text,
-    avatar_url  text,
-    created_at  timestamptz NOT NULL DEFAULT now()
-);
-CREATE TABLE IF NOT EXISTS repos (
-    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner          text NOT NULL,
-    name           text NOT NULL,
-    default_branch text NOT NULL DEFAULT 'main',
-    created_at     timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (owner, name)
-);
-CREATE TABLE IF NOT EXISTS demands (
-    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    repo_id     uuid REFERENCES repos(id) ON DELETE CASCADE,
-    module      text,
-    title       text NOT NULL,
-    body        text,
-    status      text NOT NULL DEFAULT 'open',
-    claimed_by  uuid REFERENCES users(id) ON DELETE SET NULL,
-    claimed_at  timestamptz,
-    created_by  uuid REFERENCES users(id) ON DELETE RESTRICT,
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    updated_at  timestamptz NOT NULL DEFAULT now()
-);
-CREATE TABLE IF NOT EXISTS artifacts (
-    id         text PRIMARY KEY,
-    demand_id  uuid REFERENCES demands(id) ON DELETE CASCADE,
-    repo_id    uuid REFERENCES repos(id) ON DELETE CASCADE,
-    kind       text NOT NULL,
-    module     text,
-    feature    text,
-    path       text,
-    sha        text,
-    status     text NOT NULL DEFAULT 'draft',
-    version    text,
-    content    text,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE TABLE IF NOT EXISTS spec_edges (
-    parent_id text NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
-    child_id  text NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
-    type      text NOT NULL,
-    PRIMARY KEY (parent_id, child_id, type)
-);
-CREATE TABLE IF NOT EXISTS doubts (
-    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    artifact_id text NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
-    question    text NOT NULL,
-    status      text NOT NULL DEFAULT 'pending',
-    source      text,
-    raised_at   timestamptz NOT NULL DEFAULT now(),
-    resolved_at timestamptz
-);
-CREATE TABLE IF NOT EXISTS events (
-    id          bigserial PRIMARY KEY,
-    demand_id   uuid REFERENCES demands(id) ON DELETE CASCADE,
-    artifact_id text REFERENCES artifacts(id) ON DELETE CASCADE,
-    type        text NOT NULL,
-    payload     jsonb NOT NULL DEFAULT '{}'::jsonb,
-    actor       uuid REFERENCES users(id) ON DELETE SET NULL,
-    at          timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS demands_repo_status_idx   ON demands (repo_id, status);
-CREATE INDEX IF NOT EXISTS artifacts_demand_kind_idx ON artifacts (demand_id, kind);
-CREATE INDEX IF NOT EXISTS events_demand_at_idx      ON events (demand_id, at DESC);
-"""
-
-
-def _bootstrap_ddl() -> str:
-    """DDL do banco de teste: a migration do F1 quando existe, o canônico fallback senão."""
-    migration = _SERVER / "migrations" / "001_bootstrap.sql"
-    if migration.exists():
-        return migration.read_text(encoding="utf-8")
-    return _FALLBACK_DDL
-
-
-async def _ensure_database(dsn: str) -> None:
-    """Cria o banco de teste do F5 se ele ainda não existir."""
-    parts = urlsplit(dsn)
-    admin_dsn = urlunsplit((parts.scheme, parts.netloc, "/postgres", parts.query, parts.fragment))
-    db_name = parts.path.lstrip("/")
-    conn = await asyncpg.connect(admin_dsn)
-    try:
-        exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", db_name)
-        if not exists:
-            await conn.execute(f'CREATE DATABASE "{db_name}"')
-    finally:
-        await conn.close()
-
-
-async def _truncate(pool: asyncpg.Pool) -> None:
-    """Limpa as tabelas entre os testes."""
-    rows = await pool.fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
-    names = [row["tablename"] for row in rows if row["tablename"] != "schema_migrations"]
-    if names:
-        quoted = ", ".join(f'"{name}"' for name in names)
-        await pool.execute(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
-
-
-@pytest_asyncio.fixture
-async def pool() -> AsyncIterator[asyncpg.Pool]:
-    """Pool do Postgres de teste do F5, com schema aplicado e tabelas limpas."""
-    try:
-        await _ensure_database(F5_DSN)
-        test_pool = await asyncpg.create_pool(F5_DSN, min_size=1, max_size=5)
-    except Exception as exc:  # pragma: no cover - depende do ambiente
-        pytest.skip(f"Postgres indisponível: {exc}")
-    try:
-        await test_pool.execute(_bootstrap_ddl())
-        await _truncate(test_pool)
-        yield test_pool
-    finally:
-        await test_pool.close()
-
-
-@pytest_asyncio.fixture
-async def demand(pool: asyncpg.Pool) -> dict[str, str]:
-    """Demanda `claimed`, com repo e usuário de teste."""
-    repo_id = await pool.fetchval(
-        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
-    )
-    user_id = await pool.fetchval(
-        "INSERT INTO users (github_id, login) VALUES (424242, 'tester') RETURNING id"
-    )
-    demand_id = await pool.fetchval(
-        "INSERT INTO demands (repo_id, module, title, body, status, created_by)"
-        " VALUES ($1,'login',$2,$3,'claimed',$4) RETURNING id",
-        repo_id,
-        "Autenticação de usuários com e-mail e senha",
-        "Usuários cadastrados precisam entrar no sistema.",
-        user_id,
-    )
-    return {"id": str(demand_id), "repo_id": str(repo_id), "user_id": str(user_id)}
-
+from app.routers import generation
+from app.services import generator
+from app.auth import generate_token
 
 # --------------------------------------------------------------------------- #
 # Fake do SDK anthropic (nenhuma chamada de rede)
@@ -299,6 +140,13 @@ BR_PAYLOAD: dict[str, Any] = {
     "body": BR_BODY,
 }
 
+
+def br_payload(feature: str = "login") -> dict[str, Any]:
+    """Payload do modelo para uma BR — o `feature` define o path do artefato."""
+    payload = json.loads(json.dumps(BR_PAYLOAD))
+    payload["frontmatter"]["feature"] = feature
+    return payload
+
 BR_SECTIONS = (
     "Objetivo",
     "Contexto",
@@ -330,7 +178,11 @@ SPEC_SECTIONS = (
 
 
 def _spec_body(title: str, acs: list[str]) -> str:
-    """Corpo de uma SPEC com as 14 seções de SK-002 §10."""
+    """Corpo de uma SPEC com as 14 seções de SK-002 §10.
+
+    As ACs ficam na seção "Acceptance Criteria atendidos" do CORPO (Contrato Comum
+    §8.4 D7) — é de lá que o BR-004 do linter lê a cobertura.
+    """
     ac_lines = "\n".join(f"- {ac}" for ac in acs)
     blocks = []
     for section in SPEC_SECTIONS:
@@ -374,11 +226,51 @@ def spec_payload() -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# Fixtures
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+async def demand(pool) -> dict[str, str]:
+    """Demanda `claimed`, com repo e usuário de teste."""
+    repo_id = await pool.fetchval(
+        "INSERT INTO repos (owner, name) VALUES ('acme', 'app') RETURNING id"
+    )
+    user_id = await pool.fetchval(
+        "INSERT INTO users (github_id, login) VALUES ($1, $2) RETURNING id", 313131, "f5-tester"
+    )
+    demand_id = await pool.fetchval(
+        "INSERT INTO demands (repo_id, module, title, body, status, created_by)"
+        " VALUES ($1,'login',$2,$3,'claimed',$4) RETURNING id",
+        repo_id,
+        "Autenticação de usuários com e-mail e senha",
+        "Usuários cadastrados precisam entrar no sistema.",
+        user_id,
+    )
+    return {"id": str(demand_id), "repo_id": str(repo_id), "user_id": str(user_id)}
+
+
+@pytest.fixture
+async def limited_token(pool) -> str:
+    """Token de API sem o escopo `demand:write`."""
+    raw, token_hash = generate_token()
+    user_id = await pool.fetchval(
+        "INSERT INTO users (github_id, login) VALUES ($1, $2) RETURNING id", 626262, "sem-escopo"
+    )
+    await pool.execute(
+        "INSERT INTO tokens (user_id, token_hash, scopes) VALUES ($1, $2, $3)",
+        user_id,
+        token_hash,
+        ["demand:claim"],
+    )
+    return raw
+
+
+# --------------------------------------------------------------------------- #
 # Geração de BR
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.asyncio
 async def test_generate_br_frontmatter_matches_skill_template(pool, demand) -> None:
     """12 campos de SK-001 §16, na ordem exata."""
     status, payload = await generation.handle_generate_br(
@@ -414,7 +306,6 @@ async def test_generate_br_frontmatter_matches_skill_template(pool, demand) -> N
     assert payload["artifact"]["content"].startswith("---\nid: BR-001\n")
 
 
-@pytest.mark.asyncio
 async def test_generate_br_body_has_all_sections(pool, demand) -> None:
     """9 seções de SK-001 §14, na ordem."""
     _status, payload = await generation.handle_generate_br(
@@ -425,7 +316,6 @@ async def test_generate_br_body_has_all_sections(pool, demand) -> None:
     assert positions == sorted(positions)
 
 
-@pytest.mark.asyncio
 async def test_generate_br_creates_doubts_file(pool, demand) -> None:
     """Arquivo de dúvidas no formato canônico v1, com o `doubtsIndex` bate."""
     _status, payload = await generation.handle_generate_br(
@@ -452,7 +342,6 @@ async def test_generate_br_creates_doubts_file(pool, demand) -> None:
     assert published["content"] == content
 
 
-@pytest.mark.asyncio
 async def test_generate_br_open_questions_become_doubt_rows(pool, demand) -> None:
     """Cada Open Question vira uma linha em `doubts` com `source='user'`."""
     await generation.handle_generate_br(pool, demand["id"], client=FakeClient(BR_PAYLOAD))
@@ -479,9 +368,8 @@ async def _make_br(pool, demand) -> dict[str, Any]:
     return payload["artifact"]
 
 
-@pytest.mark.asyncio
 async def test_generate_specs_frontmatter_matches_skill_template(pool, demand) -> None:
-    """15 campos de SK-002 §15 (14 do template + complexity)."""
+    """16 campos de frontmatter da SPEC (SK-002 §15 + complexity + dependsOn)."""
     br = await _make_br(pool, demand)
     status, payload = await generation.handle_generate_specs(
         pool, br["id"], client=FakeClient(spec_payload())
@@ -501,6 +389,7 @@ async def test_generate_specs_frontmatter_matches_skill_template(pool, demand) -
         "status",
         "tags",
         "complexity",
+        "dependsOn",
         "timestamp",
         "doubtsIndex",
         "version",
@@ -524,7 +413,27 @@ async def test_generate_specs_frontmatter_matches_skill_template(pool, demand) -
     ]
 
 
-@pytest.mark.asyncio
+async def test_spec_depends_on_lists_allocated_ids(pool, demand) -> None:
+    """`dependsOn` leva os IDs que o servidor alocou (Contrato Comum §8.4 D3)."""
+    br = await _make_br(pool, demand)
+    _status, payload = await generation.handle_generate_specs(
+        pool, br["id"], client=FakeClient(spec_payload())
+    )
+    by_feature = {
+        artifact["frontmatter"]["feature"]: artifact for artifact in payload["artifacts"]
+    }
+    # login-tests depende de login-api → parent = a dependente (SPEC-002).
+    assert by_feature["login-tests"]["frontmatter"]["dependsOn"] == ["SPEC-001"]
+    assert by_feature["login-api"]["frontmatter"]["dependsOn"] == []
+    # Os IDs citados existem no banco.
+    for artifact in payload["artifacts"]:
+        for dependency in artifact["frontmatter"]["dependsOn"]:
+            row = await pool.fetchrow(
+                "SELECT id FROM artifacts WHERE id = $1 AND kind = 'spec'", dependency
+            )
+            assert row is not None
+
+
 async def test_contract_api_returns_generated_artifact(pool, demand) -> None:
     """`generate_br`/`generate_specs` devolvem o `GeneratedArtifact` do Contrato §7.3."""
     ctx = generator.GenerationContext(
@@ -573,7 +482,6 @@ async def test_contract_api_returns_generated_artifact(pool, demand) -> None:
     assert all(spec["kind"] == "spec" for spec in specs)
 
 
-@pytest.mark.asyncio
 async def test_generate_specs_body_has_14_sections(pool, demand) -> None:
     """14 seções de SK-002 §10, na ordem."""
     br = await _make_br(pool, demand)
@@ -586,9 +494,8 @@ async def test_generate_specs_body_has_14_sections(pool, demand) -> None:
     assert len(SPEC_SECTIONS) == 14
 
 
-@pytest.mark.asyncio
 async def test_spec_edges_derives_from_br(pool, demand) -> None:
-    """Uma aresta `derives_from` por SPEC, apontando para a BR."""
+    """Uma aresta `derives_from` por SPEC, com parent = SPEC e child = BR (§8.4 D4)."""
     br = await _make_br(pool, demand)
     _status, payload = await generation.handle_generate_specs(
         pool, br["id"], client=FakeClient(spec_payload())
@@ -599,7 +506,6 @@ async def test_spec_edges_derives_from_br(pool, demand) -> None:
     assert {edge["parent_id"] for edge in derives} == {"SPEC-001", "SPEC-002"}
 
 
-@pytest.mark.asyncio
 async def test_spec_edges_depends_on_resolved(pool, demand) -> None:
     """`parentFeature`/`childFeature` viram arestas com o ID real do servidor."""
     br = await _make_br(pool, demand)
@@ -616,7 +522,6 @@ async def test_spec_edges_depends_on_resolved(pool, demand) -> None:
     ]
 
 
-@pytest.mark.asyncio
 async def test_spec_edges_unresolved_is_skipped_with_event(pool, demand) -> None:
     """Aresta órfã não é gravada e gera o evento `spec_edge_unresolved`."""
     br = await _make_br(pool, demand)
@@ -630,21 +535,16 @@ async def test_spec_edges_unresolved_is_skipped_with_event(pool, demand) -> None
     assert {"parent_id": "SPEC-002", "child_id": "SPEC-001", "type": "depends_on"} in payload[
         "spec_edges"
     ]
-    assert not [
-        edge for edge in payload["spec_edges"] if edge["child_id"] == "fantasma"
-    ]
-    rows = await pool.fetch(
-        "SELECT payload FROM events WHERE type = 'spec_edge_unresolved'"
-    )
+    assert not [edge for edge in payload["spec_edges"] if edge["child_id"] == "fantasma"]
+    rows = await pool.fetch("SELECT payload FROM events WHERE type = 'spec_edge_unresolved'")
     assert len(rows) == 1
     event = json.loads(rows[0]["payload"])
     assert event["childFeature"] == "fantasma"
     assert event["reason"] == "not_resolved"
 
 
-@pytest.mark.asyncio
 async def test_every_ac_covered_by_some_spec(pool, demand) -> None:
-    """Toda AC da BR aparece na SPEC que a cobre, e asACs chegam ao prompt."""
+    """Toda AC da BR aparece no CORPO de alguma SPEC (Contrato Comum §8.4 D7)."""
     br = await _make_br(pool, demand)
     client = FakeClient(spec_payload())
     _status, payload = await generation.handle_generate_specs(pool, br["id"], client=client)
@@ -652,6 +552,9 @@ async def test_every_ac_covered_by_some_spec(pool, demand) -> None:
     for artifact in payload["artifacts"]:
         covered |= set(generator.extract_acceptance_criteria(artifact["content"]))
     assert covered >= {"AC-001", "AC-002"}
+    # As ACs NÃO vão para o frontmatter da SPEC.
+    for artifact in payload["artifacts"]:
+        assert "acceptanceCriteria" not in artifact["frontmatter"]
     prompt = client.calls[0]["messages"][0]["content"]
     assert "# Acceptance Criteria da BR" in prompt
     assert "AC-001" in prompt and "AC-002" in prompt
@@ -662,7 +565,6 @@ async def test_every_ac_covered_by_some_spec(pool, demand) -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.asyncio
 async def test_generate_br_is_idempotent(pool, demand) -> None:
     """2ª chamada devolve o mesmo id, `created=false`, e não chama o modelo."""
     client = FakeClient(BR_PAYLOAD)
@@ -682,7 +584,6 @@ async def test_generate_br_is_idempotent(pool, demand) -> None:
     assert len(rows) == 1
 
 
-@pytest.mark.asyncio
 async def test_generate_specs_is_idempotent(pool, demand) -> None:
     """Idem para as SPECs."""
     br = await _make_br(pool, demand)
@@ -701,22 +602,23 @@ async def test_generate_specs_is_idempotent(pool, demand) -> None:
     assert len(rows) == 2
 
 
-@pytest.mark.asyncio
 async def test_ids_are_unique_under_concurrency(pool, demand) -> None:
     """Duas gerações concorrentes pegam IDs distintos."""
     import asyncio
 
-    repo_id = demand["repo_id"]
-    user_id = demand["user_id"]
     second = await pool.fetchval(
         "INSERT INTO demands (repo_id, module, title, body, status, created_by)"
         " VALUES ($1,'login','Outra demanda','corpo','claimed',$2) RETURNING id",
-        repo_id,
-        user_id,
+        demand["repo_id"],
+        demand["user_id"],
     )
     results = await asyncio.gather(
-        generation.handle_generate_br(pool, demand["id"], client=FakeClient(BR_PAYLOAD)),
-        generation.handle_generate_br(pool, str(second), client=FakeClient(BR_PAYLOAD)),
+        generation.handle_generate_br(
+            pool, demand["id"], client=FakeClient(br_payload("login"))
+        ),
+        generation.handle_generate_br(
+            pool, str(second), client=FakeClient(br_payload("recuperacao-senha"))
+        ),
     )
     ids = {payload["artifact"]["id"] for _status, payload in results}
     assert ids == {"BR-001", "BR-002"}
@@ -729,7 +631,6 @@ async def test_ids_are_unique_under_concurrency(pool, demand) -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.asyncio
 async def test_llm_failure_returns_503_and_resets_demand(pool, demand) -> None:
     """503 `llm_unavailable`, demanda `claimed` volta para `open`, evento registrado."""
     client = FakeClient(BR_PAYLOAD, stop_reason="max_tokens")
@@ -741,16 +642,13 @@ async def test_llm_failure_returns_503_and_resets_demand(pool, demand) -> None:
     row = await pool.fetchrow("SELECT status FROM demands WHERE id = $1", demand["id"])
     assert row["status"] == "open"
 
-    events = await pool.fetch(
-        "SELECT payload FROM events WHERE type = 'generation_failed'"
-    )
+    events = await pool.fetch("SELECT payload FROM events WHERE type = 'generation_failed'")
     assert len(events) == 1
     event = json.loads(events[0]["payload"])
     assert event["reason"] == "llm_unavailable"
     assert event["reset"] is True
 
 
-@pytest.mark.asyncio
 async def test_llm_failure_writes_nothing(pool, demand) -> None:
     """Nada gravado em `artifacts` quando o modelo falha."""
     client = FakeClient(BR_PAYLOAD, raises=RuntimeError("proxy fora"))
@@ -761,12 +659,9 @@ async def test_llm_failure_writes_nothing(pool, demand) -> None:
     assert await pool.fetchval("SELECT count(*) FROM spec_edges") == 0
 
 
-@pytest.mark.asyncio
 async def test_demand_in_progress_stays_in_progress_on_failure(pool, demand) -> None:
     """`in_progress` permanece `in_progress` — o evento carrega `reset=false`."""
-    await pool.execute(
-        "UPDATE demands SET status = 'in_progress' WHERE id = $1", demand["id"]
-    )
+    await pool.execute("UPDATE demands SET status = 'in_progress' WHERE id = $1", demand["id"])
     client = FakeClient(BR_PAYLOAD, stop_reason="max_tokens")
     status, _payload = await generation.handle_generate_br(pool, demand["id"], client=client)
     assert status == 503
@@ -778,7 +673,6 @@ async def test_demand_in_progress_stays_in_progress_on_failure(pool, demand) -> 
     assert event["reset"] is False
 
 
-@pytest.mark.asyncio
 async def test_demand_done_returns_409(pool, demand) -> None:
     """409 `illegal_transition`, sem chamar o modelo."""
     await pool.execute("UPDATE demands SET status = 'done' WHERE id = $1", demand["id"])
@@ -790,7 +684,6 @@ async def test_demand_done_returns_409(pool, demand) -> None:
     assert await pool.fetchval("SELECT count(*) FROM artifacts") == 0
 
 
-@pytest.mark.asyncio
 async def test_invalid_module_feature_returns_422(pool, demand) -> None:
     """Slug inválido → 422, nada gravado."""
     bad = json.loads(json.dumps(BR_PAYLOAD))
@@ -803,7 +696,6 @@ async def test_invalid_module_feature_returns_422(pool, demand) -> None:
     assert await pool.fetchval("SELECT count(*) FROM doubts") == 0
 
 
-@pytest.mark.asyncio
 async def test_demand_not_found_returns_404(pool) -> None:
     """Demanda inexistente → 404."""
     status, payload = await generation.handle_generate_br(
@@ -818,10 +710,9 @@ async def test_demand_not_found_returns_404(pool) -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.asyncio
 async def test_context_fallback_without_f7(pool, demand, monkeypatch) -> None:
     """Sem F7 o contexto degrada — e o artefato é gerado mesmo assim."""
-    monkeypatch.setitem(sys.modules, "app.services.retriever", None)
+    monkeypatch.setattr(generator, "_f7_search", lambda: None)
     _status, payload = await generation.handle_generate_br(
         pool, demand["id"], client=FakeClient(BR_PAYLOAD)
     )
@@ -829,13 +720,14 @@ async def test_context_fallback_without_f7(pool, demand, monkeypatch) -> None:
     assert context["degraded"] is True
     assert context["repo_hits"] == 0
     assert context["repo_corpus_id"] is None
+    assert "F7 pendente" in (context["degraded_reason"] or "")
     assert payload["artifact"]["id"] == "BR-001"
 
 
-@pytest.mark.asyncio
 async def test_context_fallback_without_f3(pool, demand, monkeypatch) -> None:
     """Sem F3 o corpus é lido localmente e o motivo cita `F3 pendente`."""
-    monkeypatch.setitem(sys.modules, "app.services.method", None)
+    monkeypatch.setattr(generator, "_f3_method_index", lambda: None)
+    monkeypatch.setattr(generator, "_f3_load_method_documents", lambda: None)
     _status, payload = await generation.handle_generate_br(
         pool, demand["id"], client=FakeClient(BR_PAYLOAD)
     )
@@ -845,9 +737,18 @@ async def test_context_fallback_without_f3(pool, demand, monkeypatch) -> None:
     assert payload["artifact"]["id"] == "BR-001"
 
 
-@pytest.mark.asyncio
+async def test_context_uses_f3_method_index(pool, demand) -> None:
+    """Com o F3 no ar, o corpus vem do `MethodIndex` (sem degradação)."""
+    _status, payload = await generation.handle_generate_br(
+        pool, demand["id"], client=FakeClient(BR_PAYLOAD)
+    )
+    context = payload["context"]
+    assert "SK-001" in context["method_docs"]
+    assert context["degraded_reason"] is None or "F3 pendente" not in context["degraded_reason"]
+
+
 async def test_generation_uses_adaptive_thinking_and_structured_output(pool, demand) -> None:
-    """A chamada usa `thinking=adaptive`, `effort=high` e o schema do artifact."""
+    """A chamada usa `thinking=adaptive`, `effort=high` e o schema do artefato."""
     client = FakeClient(BR_PAYLOAD)
     await generation.handle_generate_br(pool, demand["id"], client=client)
     call = client.calls[0]
@@ -874,7 +775,6 @@ def test_base_url_strips_v1_suffix(monkeypatch) -> None:
     assert f"{base}/v1/messages" == "http://127.0.0.1:20128/v1/messages"
 
 
-@pytest.mark.asyncio
 async def test_server_never_writes_dev_repo(pool, demand) -> None:
     """Nenhum arquivo do repo é criado ou alterado pela geração."""
     root = generator.repo_root()
@@ -891,15 +791,58 @@ async def test_server_never_writes_dev_repo(pool, demand) -> None:
     assert snapshot() == before
 
 
-@pytest.mark.skip(reason="F1 pendente")
-@pytest.mark.asyncio
-async def test_route_requires_scope() -> None:
-    """Token sem `demand:write` → 403 (depende de `app.auth`, do F1)."""
-    assert generation.require_scope is not None
+# --------------------------------------------------------------------------- #
+# Rotas HTTP (app ASGI do F1)
+# --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skip(reason="F1 pendente")
-@pytest.mark.asyncio
-async def test_route_br_returns_artifact() -> None:
-    """A rota HTTP devolve o artefato (depende de `app.db` e `app.auth`, do F1)."""
-    assert generation.router.routes
+async def test_route_requires_scope(client, limited_token) -> None:
+    """Token sem `demand:write` → 403."""
+    response = await client.post(
+        "/api/generation/demands/00000000-0000-0000-0000-000000000000/br",
+        headers={"Authorization": f"Bearer {limited_token}"},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
+
+
+async def test_route_br_returns_artifact(client, pool, demand, auth_token, monkeypatch) -> None:
+    """A rota HTTP devolve a BR gerada (com o modelo trocado pelo fake)."""
+    monkeypatch.setattr(generator, "build_client", lambda: FakeClient(BR_PAYLOAD))
+    response = await client.post(
+        f"/api/generation/demands/{demand['id']}/br",
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["created"] is True
+    assert body["artifact"]["id"] == "BR-001"
+    assert body["artifact"]["path"] == "docs/BR/login/login.md"
+    assert body["doubts_file"]["path"].endswith("duvidas-br/BR-001.md")
+    assert body["usage"] == {"input_tokens": 120, "output_tokens": 340}
+    rows = await pool.fetch("SELECT id, status FROM artifacts WHERE kind = 'br'")
+    assert [dict(row) for row in rows] == [{"id": "BR-001", "status": "draft"}]
+
+
+async def test_route_specs_returns_artifacts(client, pool, demand, auth_token, monkeypatch) -> None:
+    """A rota de SPECs devolve o lote com o grafo e o `dependsOn` no frontmatter."""
+    monkeypatch.setattr(generator, "build_client", lambda: FakeClient(BR_PAYLOAD))
+    br_response = await client.post(
+        f"/api/generation/demands/{demand['id']}/br",
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert br_response.status_code == 200
+    br_id = br_response.json()["artifact"]["id"]
+
+    monkeypatch.setattr(generator, "build_client", lambda: FakeClient(spec_payload()))
+    response = await client.post(
+        f"/api/generation/artifacts/{br_id}/specs",
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert [artifact["id"] for artifact in body["artifacts"]] == ["SPEC-001", "SPEC-002"]
+    assert body["artifacts"][1]["frontmatter"]["dependsOn"] == ["SPEC-001"]
+    assert {"parent_id": "SPEC-001", "child_id": "BR-001", "type": "derives_from"} in body[
+        "spec_edges"
+    ]
