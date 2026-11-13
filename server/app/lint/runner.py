@@ -88,12 +88,18 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
 
 
 def infer_kind(path: str) -> str | None:
-    """``docs/BR/...`` -> br, ``docs/SPEC/...`` -> spec, caso contrário None."""
+    """``docs/BR/...`` -> br, ``docs/SPEC/...`` -> spec, ``docs/RI/...`` -> ri.
+
+    O ``ri`` existe porque o F4 indexa ``docs/RI/**`` como artefato (contrato
+    §8.4 D3) — sem ele, o RI reprova no PATH-001 e fica ``draft`` para sempre.
+    """
     normalized = path.replace("\\", "/")
     if normalized.startswith("docs/BR/"):
         return "br"
     if normalized.startswith("docs/SPEC/"):
         return "spec"
+    if normalized.startswith("docs/RI/"):
+        return "ri"
     return None
 
 
@@ -239,6 +245,11 @@ class SyncedArtifacts:
 
     ``exists``/``resolve`` são síncronos (o linter é síncrono e puro): o snapshot
     é carregado por ``await refresh()`` antes do lint.
+
+    O universo inclui os **sidecars de dúvidas** (contrato §8.4 D1): o arquivo de
+    dúvidas **nunca** vira linha de ``artifacts`` — o path dele vive em
+    ``artifacts.doubts_index`` (migration 003). É esse índice que resolve o
+    ``doubtsIndex`` do PATH-002, sem que o servidor leia o disco do repo de dev.
     """
 
     def __init__(self, pool: Any):
@@ -246,16 +257,18 @@ class SyncedArtifacts:
         self._by_id: dict[str, str] = {}
         self._by_path: dict[str, str] = {}
         self._by_title: dict[str, str] = {}
+        self._by_doubts: dict[str, str] = {}
         self._loaded = False
 
     async def refresh(self) -> int:
         """Recarrega o snapshot da tabela ``artifacts``. Devolve quantos linhas."""
         rows = await self._pool.fetch(
-            "SELECT id, path, content FROM artifacts"
+            "SELECT id, path, content, doubts_index FROM artifacts"
         )
         self._by_id.clear()
         self._by_path.clear()
         self._by_title.clear()
+        self._by_doubts.clear()
         for row in rows:
             artifact_id = _as_text(row["id"])
             path = _as_text(row["path"])
@@ -264,6 +277,11 @@ class SyncedArtifacts:
             if path:
                 self._by_path.setdefault(path.replace("\\", "/"), path)
                 self._by_path.setdefault(Path(path).name, path)
+            doubts_index = _as_text(row["doubts_index"])
+            if doubts_index:
+                self._by_doubts.setdefault(
+                    doubts_index.replace("\\", "/"), doubts_index
+                )
             content = row["content"]
             if content:
                 frontmatter, _ = parse_frontmatter(content)
@@ -286,6 +304,8 @@ class SyncedArtifacts:
             return None
         if candidate in self._by_path:
             return self._by_path[candidate]
+        if candidate in self._by_doubts:
+            return self._by_doubts[candidate]
         key = candidate.upper()
         if key in self._by_id:
             return self._by_id[key]
